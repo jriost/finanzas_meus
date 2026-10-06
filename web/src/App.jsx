@@ -154,7 +154,7 @@ function Panel({ onSalir }) {
           <>
             <Resumen data={data} />
             <Quincenas data={data} mes={clave(mes)} nombre={nombreMes(mes)} accion={accion} />
-            <Deudas data={data} />
+            <Deudas data={data} mes={mes} />
             <Maestros data={data} accion={accion} />
             <footer>
               SQLite propia · {data.items.length} gastos fijos · {data.tarjetas.length} tarjetas
@@ -293,8 +293,11 @@ function Quincenas({ data, mes, nombre, accion }) {
 }
 
 /* ----------------------------------------------------------------- deudas */
-function Deudas({ data }) {
+function Deudas({ data, mes }) {
   const { tarjetas, creditos, deuda_total, cuota_deuda, cupo_total, cupo_disponible } = data;
+  // Si sigues pagando la misma cuota, el mes en que lo terminas de pagar.
+  const ultimaCuota = (n) =>
+    n ? nombreMes(new Date(mes.getFullYear(), mes.getMonth() + n - 1, 1)) : "";
   return (
     <section>
       <div className="head">
@@ -346,13 +349,28 @@ function Deudas({ data }) {
               {money(c.monto)} <small>cuota al mes</small>
             </div>
             <div className="deuda">
-              <span className="num">{c.deuda ? `Debes ${money(c.deuda)}` : "Saldo sin registrar"}</span>
-              <span>{c.quincena === "ambas" ? "las dos quincenas" : `${c.quincena}ª quincena`}</span>
+              <span className="num">{c.deuda ? `Te faltan ${money(c.deuda)}` : "Saldo sin registrar"}</span>
+              <span className="num">
+                {c.cuotas_faltantes
+                  ? `${c.cuotas_faltantes} ${c.cuotas_faltantes === 1 ? "cuota" : "cuotas"}`
+                  : c.deuda
+                    ? `${c.quincena}ª quincena`
+                    : "saldado"}
+              </span>
             </div>
-            <div className="bar-s">
-              <i style={{ width: c.deuda ? "100%" : "0%", background: color("Crédito") }} />
+            <div className="bar-s meta" title={c.avance !== null ? `${(c.avance * 100).toFixed(0)}% pagado` : ""}>
+              <i style={{ width: `${(c.avance ?? 0) * 100}%`, background: color("Crédito") }} />
             </div>
-            <div className="pie">Crédito, no tiene cupo rotativo</div>
+            <div className="pie num">
+              {c.avance === null ? (
+                "Registra con cuánto empezó para ver el avance"
+              ) : (
+                <>
+                  Llevas <b>{(c.avance * 100).toFixed(0)}%</b> — {money(c.pagado)} de {money(c.deuda_inicial)}
+                  {c.cuotas_faltantes ? ` · terminas en ${ultimaCuota(c.cuotas_faltantes)}` : ""}
+                </>
+              )}
+            </div>
           </div>
         ))}
       </div>
@@ -361,7 +379,7 @@ function Deudas({ data }) {
 }
 
 /* --------------------------------------------------------------- maestros */
-const GASTO_NUEVO = { nombre: "Nuevo gasto", monto: 0, categoria: "Otros", quincena: "1", deuda: 0 };
+const GASTO_NUEVO = { nombre: "Nuevo gasto", monto: 0, categoria: "Otros", quincena: "1", deuda: 0, deuda_inicial: 0 };
 const TARJETA_NUEVA = { nombre: "Nueva tarjeta", cupo: 0, saldo: 0, cuota: 0, dia_pago: 0, quincena: "1" };
 
 function SelectQuincena({ value, onChange }) {
@@ -383,7 +401,7 @@ function Maestros({ data, accion }) {
       })
     );
 
-  const CAMPOS_GASTO = ["nombre", "monto", "categoria", "quincena", "deuda"];
+  const CAMPOS_GASTO = ["nombre", "monto", "categoria", "quincena", "deuda", "deuda_inicial"];
   const CAMPOS_TARJETA = ["nombre", "cupo", "saldo", "cuota", "dia_pago", "quincena"];
 
   return (
@@ -497,6 +515,7 @@ function Maestros({ data, accion }) {
                   <th style={{ minWidth: 130 }}>Categoría</th>
                   <th style={{ minWidth: 120 }}>Se paga</th>
                   <th style={{ minWidth: 120 }}>Saldo que debes</th>
+                  <th style={{ minWidth: 130 }}>Empezó en</th>
                   <th />
                 </tr>
               </thead>
@@ -546,6 +565,22 @@ function Maestros({ data, accion }) {
                         defaultValue={it.deuda || ""}
                         onBlur={(e) => guardar("/items", it, CAMPOS_GASTO, { deuda: +e.target.value || 0 })}
                       />
+                    </td>
+                    <td>
+                      {it.categoria === "Crédito" ? (
+                        <input
+                          type="number"
+                          step="1000"
+                          min="0"
+                          placeholder="valor del crédito"
+                          defaultValue={it.deuda_inicial || ""}
+                          onBlur={(e) =>
+                            guardar("/items", it, CAMPOS_GASTO, { deuda_inicial: +e.target.value || 0 })
+                          }
+                        />
+                      ) : (
+                        <span className="vacio">—</span>
+                      )}
                     </td>
                     <td>
                       <button

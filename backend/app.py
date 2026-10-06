@@ -97,7 +97,8 @@ def init_db():
           CREATE TABLE IF NOT EXISTS items(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nombre TEXT NOT NULL, monto INTEGER NOT NULL,
-            categoria TEXT NOT NULL, quincena TEXT NOT NULL, deuda INTEGER NOT NULL DEFAULT 0);
+            categoria TEXT NOT NULL, quincena TEXT NOT NULL, deuda INTEGER NOT NULL DEFAULT 0,
+            deuda_inicial INTEGER NOT NULL DEFAULT 0);
           CREATE TABLE IF NOT EXISTS tarjetas(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nombre TEXT NOT NULL, cupo INTEGER NOT NULL DEFAULT 0,
@@ -107,6 +108,10 @@ def init_db():
             mes TEXT NOT NULL, origen TEXT NOT NULL, ref INTEGER NOT NULL, quincena TEXT NOT NULL,
             PRIMARY KEY(mes, origen, ref, quincena));
         """)
+
+        # Bases creadas antes de que un crédito guardara con cuánto empezó.
+        if "deuda_inicial" not in columnas(c, "items"):
+            c.execute("ALTER TABLE items ADD COLUMN deuda_inicial INTEGER NOT NULL DEFAULT 0")
 
         # Bases creadas antes de que las tarjetas fueran su propio maestro.
         if "item_id" in columnas(c, "pagos"):
@@ -134,7 +139,7 @@ def init_db():
             cfg_set(c, "sueldo", sueldo)
         if not c.execute("SELECT 1 FROM items LIMIT 1").fetchone():
             c.executemany("INSERT INTO items(nombre,monto,categoria,quincena,deuda) VALUES(?,?,?,?,?)",
-                          gastos)
+                          [g[:5] for g in gastos])
         if not c.execute("SELECT 1 FROM tarjetas LIMIT 1").fetchone():
             c.executemany("INSERT INTO tarjetas(nombre,cuota,quincena) VALUES(?,?,?)", tarjetas)
 
@@ -187,6 +192,23 @@ def parte_quincena(c: dict, q: str) -> int:
     return c["monto"] if c["quincena"] == q else 0
 
 
+def avance_credito(credito: dict) -> dict:
+    """Cuánto llevas pagado de un crédito y cuánto falta para saldarlo.
+
+    `avance` solo existe si registraste con cuánto empezó el crédito: sin ese
+    dato no hay meta contra la cual medir. Las cuotas que faltan sí salen del
+    saldo y la cuota, aunque no sepas el valor inicial.
+    """
+    inicial, saldo, cuota = credito["deuda_inicial"], credito["deuda"], credito["monto"]
+    pagado = max(0, inicial - saldo) if inicial else 0
+    return {
+        **credito,
+        "pagado": pagado,
+        "avance": round(pagado / inicial, 4) if inicial else None,
+        "cuotas_faltantes": -(-saldo // cuota) if cuota and saldo else None,
+    }
+
+
 def resumen(sueldo: int, items: list[dict], tarjetas: list[dict],
             pagados: set[tuple[str, int, str]]) -> dict:
     lista = compromisos(items, tarjetas)
@@ -214,7 +236,7 @@ def resumen(sueldo: int, items: list[dict], tarjetas: list[dict],
         {"categoria": cat, "monto": sum(c["monto"] for c in lista if c["categoria"] == cat)}
         for cat in CATEGORIAS_GRAFICO
     ]
-    creditos = [i for i in items if i["categoria"] == "Crédito"]
+    creditos = [avance_credito(i) for i in items if i["categoria"] == "Crédito"]
     cupo = sum(t["cupo"] for t in tarjetas)
     saldo = sum(t["saldo"] for t in tarjetas)
     return {
@@ -244,12 +266,15 @@ class Item(BaseModel):
     categoria: str
     quincena: str
     deuda: int = Field(default=0, ge=0, le=10**12)
+    deuda_inicial: int = Field(default=0, ge=0, le=10**12)
 
     def validar(self):
         if self.categoria not in CATEGORIAS:
             raise HTTPException(422, "Categoría desconocida.")
         if self.quincena not in QUINCENAS:
             raise HTTPException(422, "La quincena debe ser 1, 2 o ambas.")
+        if self.deuda_inicial and self.deuda > self.deuda_inicial:
+            raise HTTPException(422, "El saldo no puede ser mayor que el valor inicial del crédito.")
         return self
 
 
@@ -332,8 +357,9 @@ def set_sueldo(body: Sueldo):
 def crear_item(body: Item):
     body.validar()
     with conn() as c:
-        cur = c.execute("INSERT INTO items(nombre,monto,categoria,quincena,deuda) VALUES(?,?,?,?,?)",
-                        (body.nombre, body.monto, body.categoria, body.quincena, body.deuda))
+        cur = c.execute(
+            "INSERT INTO items(nombre,monto,categoria,quincena,deuda,deuda_inicial) VALUES(?,?,?,?,?,?)",
+            (body.nombre, body.monto, body.categoria, body.quincena, body.deuda, body.deuda_inicial))
         return {"id": cur.lastrowid, **body.model_dump()}
 
 
@@ -341,8 +367,10 @@ def crear_item(body: Item):
 def editar_item(item_id: int, body: Item):
     body.validar()
     with conn() as c:
-        cur = c.execute("UPDATE items SET nombre=?,monto=?,categoria=?,quincena=?,deuda=? WHERE id=?",
-                        (body.nombre, body.monto, body.categoria, body.quincena, body.deuda, item_id))
+        cur = c.execute(
+            "UPDATE items SET nombre=?,monto=?,categoria=?,quincena=?,deuda=?,deuda_inicial=? WHERE id=?",
+            (body.nombre, body.monto, body.categoria, body.quincena, body.deuda, body.deuda_inicial,
+             item_id))
         if not cur.rowcount:
             raise HTTPException(404, "Ese gasto ya no existe.")
     return {"id": item_id, **body.model_dump()}
@@ -414,11 +442,27 @@ if DIST.is_dir():
 # ---------------------------------------------------------------- autocomprobación
 def _test():
     # Juego de datos propio, con cifras redondas, para no depender de la semilla.
+    # Avance de un crédito: necesita el valor inicial; las cuotas no.
+    cred = {"nombre": "C", "monto": 500000, "deuda": 2000000, "deuda_inicial": 8000000}
+    a = avance_credito(cred)
+    assert (a["pagado"], a["avance"], a["cuotas_faltantes"]) == (6000000, 0.75, 4), a
+    sin_inicial = avance_credito({**cred, "deuda_inicial": 0})
+    assert sin_inicial["avance"] is None and sin_inicial["pagado"] == 0
+    assert sin_inicial["cuotas_faltantes"] == 4  # sale del saldo y la cuota
+    # Una cuota que no divide exacto deja una cuota más, no media.
+    assert avance_credito({**cred, "deuda": 2000001})["cuotas_faltantes"] == 5
+    saldado = avance_credito({**cred, "deuda": 0})
+    assert (saldado["avance"], saldado["cuotas_faltantes"]) == (1.0, None), saldado
+    recien = avance_credito({**cred, "deuda": 8000000})
+    assert recien["avance"] == 0.0 and recien["cuotas_faltantes"] == 16
+    assert avance_credito({**cred, "monto": 0})["cuotas_faltantes"] is None  # sin cuota, sin plazo
+
     gastos = [("Arriendo", 1000000, "Vivienda", "ambas", 0),
               ("Crédito", 400000, "Crédito", "1", 0),
               ("Internet", 100000, "Servicios", "2", 0)]
     tarj = [("Tarjeta A", 200000, "1"), ("Tarjeta B", 300000, "2")]
-    items = [{"id": n, "nombre": nom, "monto": m, "categoria": c, "quincena": q, "deuda": d}
+    items = [{"id": n, "nombre": nom, "monto": m, "categoria": c, "quincena": q, "deuda": d,
+              "deuda_inicial": 0}
              for n, (nom, m, c, q, d) in enumerate(gastos, 1)]
     tarjetas = [{"id": n, "nombre": nom, "cupo": 0, "saldo": 0, "cuota": cu, "dia_pago": 0, "quincena": q}
                 for n, (nom, cu, q) in enumerate(tarj, 1)]

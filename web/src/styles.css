@@ -201,3 +201,8 @@ footer { margin-top: 34px; color: var(--muted); font-size: 12px; text-align: cen
 .tc .pie { font-size: 11.5px; color: var(--muted); margin-top: 7px; }
 .ed-h { font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); font-weight: 600; font-family: var(--body); margin: 22px 0 10px; }
 .ed-body > .ed-h:first-of-type { margin-top: 0; }
+
+/* La barra de un credito mide avance hacia saldarlo, no cuanto debes. */
+.bar-s.meta { background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line-soft); }
+.tc .pie b { color: var(--ink); font-weight: 600; }
+.tbl .vacio { color: var(--muted); padding-left: 10px; }
