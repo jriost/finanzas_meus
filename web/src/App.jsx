@@ -157,7 +157,7 @@ function Panel({ onSalir }) {
             <Deudas data={data} mes={mes} />
             <Maestros data={data} accion={accion} />
             <footer>
-              SQLite propia · {data.items.length} gastos fijos · {data.tarjetas.length} tarjetas
+              SQLite propia · {data.items.length} gastos fijos · {data.deudas.length} deudas
             </footer>
           </>
         )}
@@ -296,6 +296,7 @@ function Quincenas({ data, mes, nombre, accion }) {
 
 /* ----------------------------------------------------------------- deudas */
 const tasaTexto = (t) => `${t.toLocaleString("es-CO", { maximumFractionDigits: 2 })}% E.A.`;
+const esTarjeta = (d) => d.tipo === "tarjeta";
 
 /** Qué parte de la próxima cuota se va en intereses, o el aviso si no alcanza. */
 function Interes({ plan, tasa }) {
@@ -315,14 +316,15 @@ function Interes({ plan, tasa }) {
 }
 
 function Deudas({ data, mes }) {
-  const { tarjetas, creditos, deuda_total, cuota_deuda, cupo_total, cupo_disponible } = data;
-  // Si sigues pagando la misma cuota, el mes en que lo terminas de pagar.
+  const { deudas, deuda_total, cuota_deuda, cupo_total, cupo_disponible } = data;
+  // Si sigues pagando la misma cuota, el mes en que la terminas de pagar.
   const ultimaCuota = (n) =>
     n ? nombreMes(new Date(mes.getFullYear(), mes.getMonth() + n - 1, 1)) : "";
+
   return (
     <section>
       <div className="head">
-        <h2>Tarjetas y crédito</h2>
+        <h2>Tarjetas y créditos</h2>
         <div className="note num">
           {deuda_total
             ? `${money(cuota_deuda)} al mes · ${money(deuda_total)} de deuda`
@@ -331,82 +333,73 @@ function Deudas({ data, mes }) {
         </div>
       </div>
       <div className="cards-grid">
-        {tarjetas.map((t) => {
-          const usado = t.cupo ? (t.saldo / t.cupo) * 100 : 0;
+        {deudas.map((d) => {
+          // La barra de una tarjeta se llena al deber; la de un crédito, al pagar.
+          const relleno = esTarjeta(d) ? d.uso : d.avance;
           return (
-            <div className="tc" key={"t" + t.id}>
+            <div className="tc" key={d.id}>
               <div className="nm">
-                <span className="dot" style={{ background: color("Tarjetas") }} />
-                <span>{t.nombre}</span>
-                {t.tasa ? <span className="tasa num">{tasaTexto(t.tasa)}</span> : null}
+                <span className="dot" style={{ background: color(d.categoria) }} />
+                <span>{d.nombre}</span>
+                {d.tasa ? <span className="tasa num">{tasaTexto(d.tasa)}</span> : null}
               </div>
               <div className="cuota num">
-                {money(t.cuota)} <small>cuota al mes</small>
+                {money(d.cuota)} <small>cuota al mes</small>
               </div>
               <div className="deuda">
-                <span className="num">{t.saldo ? `Debes ${money(t.saldo)}` : "Saldo sin registrar"}</span>
-                <span>
-                  {t.dia_pago ? `paga el ${t.dia_pago}` : t.quincena === "ambas" ? "las dos quincenas" : `${t.quincena}ª quincena`}
+                <span className="num">
+                  {d.saldo
+                    ? esTarjeta(d)
+                      ? `Debes ${money(d.saldo)}`
+                      : `Te faltan ${money(d.saldo)}`
+                    : "Saldo sin registrar"}
+                </span>
+                <span className="num">
+                  {d.plan && d.plan.cuotas
+                    ? `${d.plan.cuotas} ${d.plan.cuotas === 1 ? "cuota" : "cuotas"}`
+                    : d.dia_pago
+                      ? `paga el ${d.dia_pago}`
+                      : d.quincena === "ambas"
+                        ? "las dos quincenas"
+                        : `${d.quincena}ª quincena`}
                 </span>
               </div>
-              <div className="bar-s">
-                <i style={{ width: `${Math.min(100, usado)}%`, background: color("Tarjetas") }} />
+              <div className="bar-s meta">
+                <i style={{ width: `${(relleno ?? 0) * 100}%`, background: color(d.categoria) }} />
               </div>
               <div className="pie num">
-                {t.cupo
-                  ? `${money(t.cupo - t.saldo)} libres de ${money(t.cupo)}`
-                  : "Cupo sin registrar"}
-                {t.plan && !t.plan.crece ? ` · ${t.plan.cuotas} cuotas para saldarla` : ""}
+                {esTarjeta(d) ? (
+                  d.tope ? (
+                    `${money(d.disponible)} libres de ${money(d.tope)}`
+                  ) : (
+                    "Cupo sin registrar"
+                  )
+                ) : d.tope ? (
+                  <>
+                    Llevas <b>{(d.avance * 100).toFixed(0)}%</b> — {money(d.pagado)} de {money(d.tope)}
+                    {d.plan && d.plan.cuotas ? ` · terminas en ${ultimaCuota(d.plan.cuotas)}` : ""}
+                  </>
+                ) : (
+                  "Registra con cuánto empezó para ver el avance"
+                )}
               </div>
-              <Interes plan={t.plan} tasa={t.tasa} />
+              <Interes plan={d.plan} tasa={d.tasa} />
             </div>
           );
         })}
-
-        {creditos.map((c) => (
-          <div className="tc" key={"c" + c.id}>
-            <div className="nm">
-              <span className="dot" style={{ background: color("Crédito") }} />
-              <span>{c.nombre}</span>
-              {c.tasa ? <span className="tasa num">{tasaTexto(c.tasa)}</span> : null}
-            </div>
-            <div className="cuota num">
-              {money(c.monto)} <small>cuota al mes</small>
-            </div>
-            <div className="deuda">
-              <span className="num">{c.deuda ? `Te faltan ${money(c.deuda)}` : "Saldo sin registrar"}</span>
-              <span className="num">
-                {c.cuotas_faltantes
-                  ? `${c.cuotas_faltantes} ${c.cuotas_faltantes === 1 ? "cuota" : "cuotas"}`
-                  : c.deuda
-                    ? `${c.quincena}ª quincena`
-                    : "saldado"}
-              </span>
-            </div>
-            <div className="bar-s meta" title={c.avance !== null ? `${(c.avance * 100).toFixed(0)}% pagado` : ""}>
-              <i style={{ width: `${(c.avance ?? 0) * 100}%`, background: color("Crédito") }} />
-            </div>
-            <div className="pie num">
-              {c.avance === null ? (
-                "Registra con cuánto empezó para ver el avance"
-              ) : (
-                <>
-                  Llevas <b>{(c.avance * 100).toFixed(0)}%</b> — {money(c.pagado)} de {money(c.deuda_inicial)}
-                  {c.cuotas_faltantes ? ` · terminas en ${ultimaCuota(c.cuotas_faltantes)}` : ""}
-                </>
-              )}
-            </div>
-            <Interes plan={c.plan} tasa={c.tasa} />
-          </div>
-        ))}
       </div>
     </section>
   );
 }
 
 /* --------------------------------------------------------------- maestros */
-const GASTO_NUEVO = { nombre: "Nuevo gasto", monto: 0, categoria: "Otros", quincena: "1", deuda: 0, deuda_inicial: 0, tasa: 0 };
-const TARJETA_NUEVA = { nombre: "Nueva tarjeta", cupo: 0, saldo: 0, cuota: 0, dia_pago: 0, quincena: "1", tasa: 0 };
+const GASTO_NUEVO = { nombre: "Nuevo gasto", monto: 0, categoria: "Otros", quincena: "1" };
+const DEUDA_NUEVA = {
+  nombre: "Nueva tarjeta", tipo: "tarjeta", tope: 0, saldo: 0,
+  cuota: 0, dia_pago: 0, tasa: 0, quincena: "1",
+};
+const CAMPOS_GASTO = ["nombre", "monto", "categoria", "quincena"];
+const CAMPOS_DEUDA = ["nombre", "tipo", "tope", "saldo", "cuota", "dia_pago", "tasa", "quincena"];
 
 function SelectQuincena({ value, onChange }) {
   return (
@@ -426,14 +419,13 @@ function Maestros({ data, accion }) {
         body: { ...Object.fromEntries(campos.map((k) => [k, fila[k]])), ...cambio },
       })
     );
-
-  const CAMPOS_GASTO = ["nombre", "monto", "categoria", "quincena", "deuda", "deuda_inicial", "tasa"];
-  const CAMPOS_TARJETA = ["nombre", "cupo", "saldo", "cuota", "dia_pago", "quincena", "tasa"];
+  const guardarDeuda = (d, cambio) => guardar("/deudas", d, CAMPOS_DEUDA, cambio);
+  const guardarGasto = (g, cambio) => guardar("/items", g, CAMPOS_GASTO, cambio);
 
   return (
     <section>
       <details className="ed">
-        <summary>Maestros: gastos fijos, tarjetas y sueldo</summary>
+        <summary>Maestros: gastos fijos, deudas y sueldo</summary>
         <div className="ed-body">
           <div className="sueldo-box">
             <label htmlFor="sueldo">Sueldo mensual</label>
@@ -450,13 +442,14 @@ function Maestros({ data, accion }) {
             <span className="chip gray num">{money(data.sueldo / 2)} por quincena</span>
           </div>
 
-          <h3 className="ed-h">Tarjetas de crédito</h3>
+          <h3 className="ed-h">Tarjetas y créditos</h3>
           <div className="scroll">
             <table className="tbl">
               <thead>
                 <tr>
-                  <th style={{ minWidth: 150 }}>Tarjeta</th>
-                  <th style={{ minWidth: 115 }}>Cupo</th>
+                  <th style={{ minWidth: 150 }}>Nombre</th>
+                  <th style={{ minWidth: 110 }}>Tipo</th>
+                  <th style={{ minWidth: 130 }}>Cupo o valor inicial</th>
                   <th style={{ minWidth: 115 }}>Saldo que debes</th>
                   <th style={{ minWidth: 115 }}>Cuota mensual</th>
                   <th style={{ minWidth: 80 }}>Día de pago</th>
@@ -466,28 +459,30 @@ function Maestros({ data, accion }) {
                 </tr>
               </thead>
               <tbody>
-                {data.tarjetas.map((t) => (
-                  <tr key={t.id}>
+                {data.deudas.map((d) => (
+                  <tr key={d.id}>
                     <td>
                       <input
                         type="text"
-                        defaultValue={t.nombre}
-                        onBlur={(e) =>
-                          guardar("/tarjetas", t, CAMPOS_TARJETA, { nombre: e.target.value.trim() || t.nombre })
-                        }
+                        defaultValue={d.nombre}
+                        onBlur={(e) => guardarDeuda(d, { nombre: e.target.value.trim() || d.nombre })}
                       />
                     </td>
-                    {["cupo", "saldo", "cuota"].map((campo) => (
+                    <td>
+                      <select value={d.tipo} onChange={(e) => guardarDeuda(d, { tipo: e.target.value })}>
+                        <option value="tarjeta">Tarjeta</option>
+                        <option value="credito">Crédito</option>
+                      </select>
+                    </td>
+                    {["tope", "saldo", "cuota"].map((campo) => (
                       <td key={campo}>
                         <input
                           type="number"
                           step="1000"
                           min="0"
                           placeholder="0"
-                          defaultValue={t[campo] || ""}
-                          onBlur={(e) =>
-                            guardar("/tarjetas", t, CAMPOS_TARJETA, { [campo]: +e.target.value || 0 })
-                          }
+                          defaultValue={d[campo] || ""}
+                          onBlur={(e) => guardarDeuda(d, { [campo]: +e.target.value || 0 })}
                         />
                       </td>
                     ))}
@@ -497,10 +492,8 @@ function Maestros({ data, accion }) {
                         min="0"
                         max="31"
                         placeholder="—"
-                        defaultValue={t.dia_pago || ""}
-                        onBlur={(e) =>
-                          guardar("/tarjetas", t, CAMPOS_TARJETA, { dia_pago: +e.target.value || 0 })
-                        }
+                        defaultValue={d.dia_pago || ""}
+                        onBlur={(e) => guardarDeuda(d, { dia_pago: +e.target.value || 0 })}
                       />
                     </td>
                     <td>
@@ -510,23 +503,21 @@ function Maestros({ data, accion }) {
                         min="0"
                         max="500"
                         placeholder="—"
-                        defaultValue={t.tasa || ""}
-                        onBlur={(e) =>
-                          guardar("/tarjetas", t, CAMPOS_TARJETA, { tasa: +e.target.value || 0 })
-                        }
+                        defaultValue={d.tasa || ""}
+                        onBlur={(e) => guardarDeuda(d, { tasa: +e.target.value || 0 })}
                       />
                     </td>
                     <td>
                       <SelectQuincena
-                        value={t.quincena}
-                        onChange={(e) => guardar("/tarjetas", t, CAMPOS_TARJETA, { quincena: e.target.value })}
+                        value={d.quincena}
+                        onChange={(e) => guardarDeuda(d, { quincena: e.target.value })}
                       />
                     </td>
                     <td>
                       <button
                         className="btn x"
-                        title={`Eliminar ${t.nombre}`}
-                        onClick={() => accion(() => api(`/tarjetas/${t.id}`, { method: "DELETE" }))}
+                        title={`Eliminar ${d.nombre}`}
+                        onClick={() => accion(() => api(`/deudas/${d.id}`, { method: "DELETE" }))}
                       >
                         ×
                       </button>
@@ -539,9 +530,9 @@ function Maestros({ data, accion }) {
           <div className="ed-row">
             <button
               className="btn"
-              onClick={() => accion(() => api("/tarjetas", { method: "POST", body: TARJETA_NUEVA }))}
+              onClick={() => accion(() => api("/deudas", { method: "POST", body: DEUDA_NUEVA }))}
             >
-              Agregar tarjeta
+              Agregar tarjeta o crédito
             </button>
           </div>
 
@@ -550,13 +541,10 @@ function Maestros({ data, accion }) {
             <table className="tbl">
               <thead>
                 <tr>
-                  <th style={{ minWidth: 150 }}>Concepto</th>
-                  <th style={{ minWidth: 115 }}>Mensual</th>
-                  <th style={{ minWidth: 130 }}>Categoría</th>
-                  <th style={{ minWidth: 120 }}>Se paga</th>
-                  <th style={{ minWidth: 120 }}>Saldo que debes</th>
-                  <th style={{ minWidth: 130 }}>Empezó en</th>
-                  <th style={{ minWidth: 100 }}>Tasa % E.A.</th>
+                  <th style={{ minWidth: 170 }}>Concepto</th>
+                  <th style={{ minWidth: 120 }}>Mensual</th>
+                  <th style={{ minWidth: 150 }}>Categoría</th>
+                  <th style={{ minWidth: 130 }}>Se paga</th>
                   <th />
                 </tr>
               </thead>
@@ -567,9 +555,7 @@ function Maestros({ data, accion }) {
                       <input
                         type="text"
                         defaultValue={it.nombre}
-                        onBlur={(e) =>
-                          guardar("/items", it, CAMPOS_GASTO, { nombre: e.target.value.trim() || it.nombre })
-                        }
+                        onBlur={(e) => guardarGasto(it, { nombre: e.target.value.trim() || it.nombre })}
                       />
                     </td>
                     <td>
@@ -578,13 +564,13 @@ function Maestros({ data, accion }) {
                         step="1000"
                         min="0"
                         defaultValue={it.monto}
-                        onBlur={(e) => guardar("/items", it, CAMPOS_GASTO, { monto: +e.target.value || 0 })}
+                        onBlur={(e) => guardarGasto(it, { monto: +e.target.value || 0 })}
                       />
                     </td>
                     <td>
                       <select
                         value={it.categoria}
-                        onChange={(e) => guardar("/items", it, CAMPOS_GASTO, { categoria: e.target.value })}
+                        onChange={(e) => guardarGasto(it, { categoria: e.target.value })}
                       >
                         {data.categorias.map((c) => (
                           <option key={c}>{c}</option>
@@ -594,49 +580,8 @@ function Maestros({ data, accion }) {
                     <td>
                       <SelectQuincena
                         value={it.quincena}
-                        onChange={(e) => guardar("/items", it, CAMPOS_GASTO, { quincena: e.target.value })}
+                        onChange={(e) => guardarGasto(it, { quincena: e.target.value })}
                       />
-                    </td>
-                    <td>
-                      <input
-                        type="number"
-                        step="1000"
-                        min="0"
-                        placeholder={it.categoria === "Crédito" ? "0" : "—"}
-                        defaultValue={it.deuda || ""}
-                        onBlur={(e) => guardar("/items", it, CAMPOS_GASTO, { deuda: +e.target.value || 0 })}
-                      />
-                    </td>
-                    <td>
-                      {it.categoria === "Crédito" ? (
-                        <input
-                          type="number"
-                          step="1000"
-                          min="0"
-                          placeholder="valor del crédito"
-                          defaultValue={it.deuda_inicial || ""}
-                          onBlur={(e) =>
-                            guardar("/items", it, CAMPOS_GASTO, { deuda_inicial: +e.target.value || 0 })
-                          }
-                        />
-                      ) : (
-                        <span className="vacio">—</span>
-                      )}
-                    </td>
-                    <td>
-                      {it.categoria === "Crédito" ? (
-                        <input
-                          type="number"
-                          step="0.01"
-                          min="0"
-                          max="500"
-                          placeholder="—"
-                          defaultValue={it.tasa || ""}
-                          onBlur={(e) => guardar("/items", it, CAMPOS_GASTO, { tasa: +e.target.value || 0 })}
-                        />
-                      ) : (
-                        <span className="vacio">—</span>
-                      )}
                     </td>
                     <td>
                       <button

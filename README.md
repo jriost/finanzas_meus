@@ -72,7 +72,7 @@ cd backend; python app.py --test    # cálculo quincenal, token y lectura del .e
 | Ruta | Qué es |
 |---|---|
 | `backend/app.py` | API completa: login, maestros, pagos y los números calculados |
-| `backend/finanzas.db` | SQLite: `items` y `tarjetas` (los maestros), `pagos` (por mes) y `config` (sueldo) |
+| `backend/finanzas.db` | SQLite: `items` y `deudas` (los maestros), `pagos` (por mes) y `config` (sueldo) |
 | `backend/semilla.json` | Con que se llena una base vacia. Tus cifras, no va a git; `semilla.example.json` es la plantilla |
 | `.env` | Tu usuario y contraseña. No va a git |
 | `deploy.ps1` | Compila y publica en el servidor |
@@ -82,3 +82,10 @@ cd backend; python app.py --test    # cálculo quincenal, token y lectura del .e
 Los conceptos marcados como **ambas** quincenas se parten por la mitad en cada
 una. Los pagos se guardan por mes, así que cambiar de mes empieza la lista en
 limpio sin perder el historial.
+
+Lo que debes vive aparte de lo que gastas: un gasto fijo solo tiene monto,
+categoría y quincena, mientras que una **deuda** —tarjeta o crédito— lleva
+saldo, cuota, tasa y un `tope` que se lee distinto según el tipo: en una
+tarjeta es el cupo y la barra se llena al deber, y en un crédito es con cuánto
+empezaste y la barra se llena al pagar. `init_db` migra sola las bases de
+versiones anteriores.

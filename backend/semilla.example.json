@@ -2,59 +2,15 @@
   "_nota": "Plantilla. Copiala como semilla.json con tus cifras; semilla.json no va a git.",
   "sueldo": 2400000,
   "gastos": [
-    [
-      "Arriendo",
-      1000000,
-      "Vivienda",
-      "ambas",
-      0
-    ],
-    [
-      "Crédito",
-      400000,
-      "Crédito",
-      "1",
-      0
-    ],
-    [
-      "Mercado",
-      300000,
-      "Comida y vida",
-      "ambas",
-      0
-    ],
-    [
-      "Servicios (luz, agua, gas)",
-      120000,
-      "Servicios",
-      "2",
-      0
-    ],
-    [
-      "Internet",
-      80000,
-      "Servicios",
-      "2",
-      0
-    ],
-    [
-      "Transporte",
-      150000,
-      "Otros",
-      "ambas",
-      0
-    ]
+    ["Arriendo", 1000000, "Vivienda", "ambas"],
+    ["Mercado", 300000, "Comida y vida", "ambas"],
+    ["Servicios (luz, agua, gas)", 120000, "Servicios", "2"],
+    ["Internet", 80000, "Servicios", "2"],
+    ["Transporte", 150000, "Otros", "ambas"]
   ],
-  "tarjetas": [
-    [
-      "Tarjeta 1",
-      200000,
-      "1"
-    ],
-    [
-      "Tarjeta 2",
-      150000,
-      "2"
-    ]
+  "deudas": [
+    ["Tarjeta 1", "tarjeta", 200000, "1"],
+    ["Tarjeta 2", "tarjeta", 150000, "2"],
+    ["Crédito", "credito", 400000, "1"]
   ]
 }

@@ -2,8 +2,8 @@
 
 Arranque:  uvicorn app:app --reload    (desde esta carpeta)
 Usuario:   FINANZAS_USER y FINANZAS_PASSWORD en el .env de la raíz del proyecto.
-Datos:     SQLite (finanzas.db) con dos maestros —gastos fijos y tarjetas— más
-           el sueldo y los pagos marcados de cada mes.
+Datos:     SQLite (finanzas.db) con dos maestros —gastos fijos y deudas— más el
+           sueldo y los pagos marcados de cada mes.
 """
 import hashlib
 import hmac
@@ -44,24 +44,29 @@ PASSWORD = os.environ.get("FINANZAS_PASSWORD", "")
 DB_PATH = Path(os.environ.get("FINANZAS_DB", BASE / "finanzas.db"))
 DIST = BASE.parent / "web" / "dist"
 
-# "Tarjetas" no es categoría de un gasto fijo: las tarjetas son su propio maestro.
-CATEGORIAS = ["Vivienda", "Crédito", "Servicios", "Comida y vida", "Salud", "Otros"]
+# Lo que debes no es un gasto fijo más: tarjetas y créditos tienen saldo, tope,
+# tasa y plazo. Viven en su propio maestro y estas no son categorías de gasto.
+CATEGORIAS = ["Vivienda", "Servicios", "Comida y vida", "Salud", "Otros"]
 CATEGORIAS_GRAFICO = ["Vivienda", "Tarjetas", "Crédito", "Servicios", "Comida y vida", "Salud", "Otros"]
 QUINCENAS = ["1", "2", "ambas"]
+TIPOS = ["tarjeta", "credito"]
 TOKEN_TTL = 60 * 60 * 24 * 30  # 30 días
+
+CAT_DEUDA = {"tarjeta": "Tarjetas", "credito": "Crédito"}
+
 
 def cargar_semilla() -> tuple[int, list, list]:
     """Con qué llenar una base vacía: semilla.json si existe, si no la plantilla.
 
-    Los gastos van como [nombre, monto, categoría, quincena, deuda] y las
-    tarjetas como [nombre, cuota, quincena]; cupo, saldo y día de pago empiezan
-    en cero porque solo tú los sabes.
+    Los gastos van como [nombre, monto, categoría, quincena] y las deudas como
+    [nombre, tipo, cuota, quincena]; saldo, tope, tasa y día de pago empiezan en
+    cero porque solo tú los sabes.
     """
     ruta = BASE / "semilla.json"
     if not ruta.is_file():
         ruta = BASE / "semilla.example.json"
     d = json.loads(ruta.read_text(encoding="utf-8"))
-    return d["sueldo"], d["gastos"], d["tarjetas"]
+    return d["sueldo"], d["gastos"], d["deudas"]
 
 
 # ---------------------------------------------------------------- base de datos
@@ -90,64 +95,94 @@ def columnas(c, tabla) -> set[str]:
     return {r[1] for r in c.execute(f"SELECT * FROM pragma_table_info('{tabla}')")}
 
 
+def existe(c, tabla) -> bool:
+    return bool(c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                          (tabla,)).fetchone())
+
+
+def migrar(c):
+    """Lleva una base de cualquier versión anterior al esquema de hoy."""
+    # Los pagos apuntaban solo a items, antes de que hubiera un maestro de deudas.
+    if existe(c, "pagos") and "item_id" in columnas(c, "pagos"):
+        c.executescript("""
+          ALTER TABLE pagos RENAME TO pagos_viejo;
+          CREATE TABLE pagos(
+            mes TEXT NOT NULL, origen TEXT NOT NULL, ref INTEGER NOT NULL, quincena TEXT NOT NULL,
+            PRIMARY KEY(mes, origen, ref, quincena));
+          INSERT INTO pagos(mes,origen,ref,quincena)
+            SELECT mes,'gasto',item_id,quincena FROM pagos_viejo;
+          DROP TABLE pagos_viejo;
+        """)
+    c.execute("UPDATE pagos SET origen='gasto' WHERE origen='item'")
+
+    # La tabla 'tarjetas' pasó a ser 'deudas', que también guarda los créditos.
+    if existe(c, "tarjetas"):
+        for t in c.execute("SELECT * FROM tarjetas").fetchall():
+            cur = c.execute(
+                "INSERT INTO deudas(nombre,tipo,tope,saldo,cuota,dia_pago,tasa,quincena)"
+                " VALUES(?,'tarjeta',?,?,?,?,?,?)",
+                (t["nombre"], t["cupo"], t["saldo"], t["cuota"], t["dia_pago"],
+                 t["tasa"] if "tasa" in t.keys() else 0, t["quincena"]))
+            c.execute("UPDATE pagos SET origen='deuda', ref=? WHERE origen='tarjeta' AND ref=?",
+                      (cur.lastrowid, t["id"]))
+        c.execute("DROP TABLE tarjetas")
+
+    # Los gastos de categoría Tarjetas o Crédito eran deudas disfrazadas.
+    cols = columnas(c, "items")
+    for g in c.execute("SELECT * FROM items WHERE categoria IN ('Tarjetas','Crédito')").fetchall():
+        tipo = "tarjeta" if g["categoria"] == "Tarjetas" else "credito"
+        cur = c.execute(
+            "INSERT INTO deudas(nombre,tipo,tope,saldo,cuota,tasa,quincena) VALUES(?,?,?,?,?,?,?)",
+            (g["nombre"], tipo,
+             g["deuda_inicial"] if "deuda_inicial" in cols else 0,
+             g["deuda"] if "deuda" in cols else 0,
+             g["monto"], g["tasa"] if "tasa" in cols else 0, g["quincena"]))
+        c.execute("UPDATE pagos SET origen='deuda', ref=? WHERE origen='gasto' AND ref=?",
+                  (cur.lastrowid, g["id"]))
+        c.execute("DELETE FROM items WHERE id=?", (g["id"],))
+
+    # Un gasto fijo ya no lleva saldo, valor inicial ni tasa: eso es de una deuda.
+    if cols - {"id", "nombre", "monto", "categoria", "quincena"}:
+        c.executescript("""
+          ALTER TABLE items RENAME TO items_viejo;
+          CREATE TABLE items(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, monto INTEGER NOT NULL,
+            categoria TEXT NOT NULL, quincena TEXT NOT NULL);
+          INSERT INTO items(id,nombre,monto,categoria,quincena)
+            SELECT id,nombre,monto,categoria,quincena FROM items_viejo;
+          DROP TABLE items_viejo;
+        """)
+
+
 def init_db():
     with conn() as c:
         c.executescript("""
           CREATE TABLE IF NOT EXISTS config(k TEXT PRIMARY KEY, v TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS items(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, monto INTEGER NOT NULL,
+            categoria TEXT NOT NULL, quincena TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS deudas(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nombre TEXT NOT NULL, monto INTEGER NOT NULL,
-            categoria TEXT NOT NULL, quincena TEXT NOT NULL, deuda INTEGER NOT NULL DEFAULT 0,
-            deuda_inicial INTEGER NOT NULL DEFAULT 0, tasa REAL NOT NULL DEFAULT 0);
-          CREATE TABLE IF NOT EXISTS tarjetas(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nombre TEXT NOT NULL, cupo INTEGER NOT NULL DEFAULT 0,
+            nombre TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'tarjeta',
+            tope INTEGER NOT NULL DEFAULT 0,      -- cupo de la tarjeta, o con cuánto empezó el crédito
             saldo INTEGER NOT NULL DEFAULT 0, cuota INTEGER NOT NULL DEFAULT 0,
-            dia_pago INTEGER NOT NULL DEFAULT 0, quincena TEXT NOT NULL DEFAULT '1',
-            tasa REAL NOT NULL DEFAULT 0);
+            dia_pago INTEGER NOT NULL DEFAULT 0, tasa REAL NOT NULL DEFAULT 0,
+            quincena TEXT NOT NULL DEFAULT '1');
           CREATE TABLE IF NOT EXISTS pagos(
             mes TEXT NOT NULL, origen TEXT NOT NULL, ref INTEGER NOT NULL, quincena TEXT NOT NULL,
             PRIMARY KEY(mes, origen, ref, quincena));
         """)
-
-        # Bases creadas antes de que un crédito guardara con cuánto empezó.
-        if "deuda_inicial" not in columnas(c, "items"):
-            c.execute("ALTER TABLE items ADD COLUMN deuda_inicial INTEGER NOT NULL DEFAULT 0")
-
-        # Bases creadas antes de que se registrara la tasa de interés.
-        for tabla in ("items", "tarjetas"):
-            if "tasa" not in columnas(c, tabla):
-                c.execute(f"ALTER TABLE {tabla} ADD COLUMN tasa REAL NOT NULL DEFAULT 0")
-
-        # Bases creadas antes de que las tarjetas fueran su propio maestro.
-        if "item_id" in columnas(c, "pagos"):
-            c.executescript("""
-              ALTER TABLE pagos RENAME TO pagos_viejo;
-              CREATE TABLE pagos(
-                mes TEXT NOT NULL, origen TEXT NOT NULL, ref INTEGER NOT NULL, quincena TEXT NOT NULL,
-                PRIMARY KEY(mes, origen, ref, quincena));
-              INSERT INTO pagos(mes,origen,ref,quincena)
-                SELECT mes,'item',item_id,quincena FROM pagos_viejo;
-              DROP TABLE pagos_viejo;
-            """)
-        viejas = c.execute("SELECT * FROM items WHERE categoria='Tarjetas'").fetchall()
-        for t in viejas:
-            cur = c.execute("INSERT INTO tarjetas(nombre,saldo,cuota,quincena) VALUES(?,?,?,?)",
-                            (t["nombre"], t["deuda"], t["monto"], t["quincena"]))
-            c.execute("UPDATE pagos SET origen='tarjeta', ref=? WHERE origen='item' AND ref=?",
-                      (cur.lastrowid, t["id"]))
-            c.execute("DELETE FROM items WHERE id=?", (t["id"],))
+        migrar(c)
 
         if cfg_get(c, "secret") is None:
             cfg_set(c, "secret", secrets.token_hex(32))
-        sueldo, gastos, tarjetas = cargar_semilla()
+        sueldo, gastos, deudas = cargar_semilla()
         if cfg_get(c, "sueldo") is None:
             cfg_set(c, "sueldo", sueldo)
         if not c.execute("SELECT 1 FROM items LIMIT 1").fetchone():
-            c.executemany("INSERT INTO items(nombre,monto,categoria,quincena,deuda) VALUES(?,?,?,?,?)",
-                          [g[:5] for g in gastos])
-        if not c.execute("SELECT 1 FROM tarjetas LIMIT 1").fetchone():
-            c.executemany("INSERT INTO tarjetas(nombre,cuota,quincena) VALUES(?,?,?)", tarjetas)
+            c.executemany("INSERT INTO items(nombre,monto,categoria,quincena) VALUES(?,?,?,?)", gastos)
+        if not c.execute("SELECT 1 FROM deudas LIMIT 1").fetchone():
+            c.executemany("INSERT INTO deudas(nombre,tipo,cuota,quincena) VALUES(?,?,?,?)", deudas)
 
 
 # ---------------------------------------------------------------- autenticación
@@ -176,28 +211,6 @@ def auth(request: Request):
 
 
 # ---------------------------------------------------------------- cálculo
-def compromisos(items: list[dict], tarjetas: list[dict]) -> list[dict]:
-    """Los dos maestros vistos como una sola lista de cosas por pagar."""
-    de_items = [
-        {"origen": "item", "ref": i["id"], "nombre": i["nombre"], "monto": i["monto"],
-         "categoria": i["categoria"], "quincena": i["quincena"]}
-        for i in items
-    ]
-    de_tarjetas = [
-        {"origen": "tarjeta", "ref": t["id"], "nombre": t["nombre"], "monto": t["cuota"],
-         "categoria": "Tarjetas", "quincena": t["quincena"]}
-        for t in tarjetas
-    ]
-    return de_items + de_tarjetas
-
-
-def parte_quincena(c: dict, q: str) -> int:
-    """Lo que cae en la quincena q. Un compromiso de 'ambas' se parte por la mitad."""
-    if c["quincena"] == "ambas":
-        return round(c["monto"] / 2)
-    return c["monto"] if c["quincena"] == q else 0
-
-
 TOPE_CUOTAS = 600  # 50 años: más allá de eso la deuda no se está pagando
 
 
@@ -232,28 +245,50 @@ def plan_pago(saldo: int, cuota: int, tasa_ea: float) -> dict | None:
             "abono_capital": cuota - interes_mes, "interes_total": round(interes), "crece": False}
 
 
-def avance_credito(credito: dict) -> dict:
-    """Cuánto llevas pagado de un crédito y cuánto falta para saldarlo.
+def mirar_deuda(d: dict) -> dict:
+    """Una deuda con lo que se puede deducir de ella.
 
-    `avance` solo existe si registraste con cuánto empezó el crédito: sin ese
-    dato no hay meta contra la cual medir. Las cuotas que faltan sí salen del
-    saldo, la cuota y la tasa, aunque no sepas el valor inicial.
+    `tope` se lee distinto según el tipo: en una tarjeta es el cupo, y lo que
+    importa es cuánto llevas usado; en un crédito es con cuánto empezaste, y lo
+    que importa es cuánto llevas pagado. Ambos salen de la misma resta.
     """
-    inicial, saldo = credito["deuda_inicial"], credito["deuda"]
-    pagado = max(0, inicial - saldo) if inicial else 0
-    plan = plan_pago(saldo, credito["monto"], credito.get("tasa", 0))
+    tope, saldo = d["tope"], d["saldo"]
     return {
-        **credito,
-        "pagado": pagado,
-        "avance": round(pagado / inicial, 4) if inicial else None,
-        "cuotas_faltantes": plan["cuotas"] if plan else None,
-        "plan": plan,
+        **d,
+        "categoria": CAT_DEUDA[d["tipo"]],
+        "disponible": tope - saldo if tope else None,
+        "pagado": max(0, tope - saldo) if tope else 0,
+        "avance": round(max(0, tope - saldo) / tope, 4) if tope else None,
+        "uso": round(min(1, saldo / tope), 4) if tope else None,
+        "plan": plan_pago(saldo, d["cuota"], d["tasa"]),
     }
 
 
-def resumen(sueldo: int, items: list[dict], tarjetas: list[dict],
+def compromisos(items: list[dict], deudas: list[dict]) -> list[dict]:
+    """Los dos maestros vistos como una sola lista de cosas por pagar."""
+    de_gastos = [
+        {"origen": "gasto", "ref": i["id"], "nombre": i["nombre"], "monto": i["monto"],
+         "categoria": i["categoria"], "quincena": i["quincena"]}
+        for i in items
+    ]
+    de_deudas = [
+        {"origen": "deuda", "ref": d["id"], "nombre": d["nombre"], "monto": d["cuota"],
+         "categoria": CAT_DEUDA[d["tipo"]], "quincena": d["quincena"]}
+        for d in deudas
+    ]
+    return de_gastos + de_deudas
+
+
+def parte_quincena(c: dict, q: str) -> int:
+    """Lo que cae en la quincena q. Un compromiso de 'ambas' se parte por la mitad."""
+    if c["quincena"] == "ambas":
+        return round(c["monto"] / 2)
+    return c["monto"] if c["quincena"] == q else 0
+
+
+def resumen(sueldo: int, items: list[dict], deudas: list[dict],
             pagados: set[tuple[str, int, str]]) -> dict:
-    lista = compromisos(items, tarjetas)
+    lista = compromisos(items, deudas)
     total = sum(c["monto"] for c in lista)
 
     por_quincena = []
@@ -278,25 +313,23 @@ def resumen(sueldo: int, items: list[dict], tarjetas: list[dict],
         {"categoria": cat, "monto": sum(c["monto"] for c in lista if c["categoria"] == cat)}
         for cat in CATEGORIAS_GRAFICO
     ]
-    creditos = [avance_credito(i) for i in items if i["categoria"] == "Crédito"]
-    tarjetas = [{**t, "plan": plan_pago(t["saldo"], t["cuota"], t.get("tasa", 0))} for t in tarjetas]
-    cupo = sum(t["cupo"] for t in tarjetas)
-    saldo = sum(t["saldo"] for t in tarjetas)
-    planes = [d["plan"] for d in (*tarjetas, *creditos) if d["plan"]]
+    vistas = [mirar_deuda(d) for d in deudas]
+    tarjetas = [d for d in vistas if d["tipo"] == "tarjeta"]
+    cupo = sum(t["tope"] for t in tarjetas)
+    usado = sum(t["saldo"] for t in tarjetas)
     return {
-        "tarjetas": tarjetas,
-        "interes_mes": sum(p["interes_mes"] for p in planes),
         "sueldo": sueldo,
         "total": total,
         "libre": sueldo - total,
         "pendientes": sum(1 for q in por_quincena for f in q["filas"] if not f["pagado"]),
         "por_quincena": por_quincena,
         "por_categoria": [c for c in por_categoria if c["monto"] > 0],
-        "deuda_total": saldo + sum(i["deuda"] for i in creditos),
-        "cuota_deuda": sum(t["cuota"] for t in tarjetas) + sum(i["monto"] for i in creditos),
+        "deudas": sorted(vistas, key=lambda d: (d["tipo"], -d["saldo"])),
+        "deuda_total": sum(d["saldo"] for d in vistas),
+        "cuota_deuda": sum(d["cuota"] for d in vistas),
+        "interes_mes": sum(d["plan"]["interes_mes"] for d in vistas if d["plan"]),
         "cupo_total": cupo,
-        "cupo_disponible": cupo - saldo,
-        "creditos": sorted(creditos, key=lambda i: -i["monto"]),
+        "cupo_disponible": cupo - usado,
     }
 
 
@@ -311,34 +344,35 @@ class Item(BaseModel):
     monto: int = Field(ge=0, le=10**10)
     categoria: str
     quincena: str
-    deuda: int = Field(default=0, ge=0, le=10**12)
-    deuda_inicial: int = Field(default=0, ge=0, le=10**12)
-    tasa: float = Field(default=0, ge=0, le=500)  # % efectivo anual
 
     def validar(self):
         if self.categoria not in CATEGORIAS:
-            raise HTTPException(422, "Categoría desconocida.")
+            raise HTTPException(422, "Esa categoría no existe. Las tarjetas y créditos "
+                                     "van en su propio maestro.")
         if self.quincena not in QUINCENAS:
             raise HTTPException(422, "La quincena debe ser 1, 2 o ambas.")
-        if self.deuda_inicial and self.deuda > self.deuda_inicial:
-            raise HTTPException(422, "El saldo no puede ser mayor que el valor inicial del crédito.")
         return self
 
 
-class Tarjeta(BaseModel):
+class Deuda(BaseModel):
     nombre: str = Field(min_length=1, max_length=80)
-    cupo: int = Field(default=0, ge=0, le=10**12)
+    tipo: str = "tarjeta"
+    tope: int = Field(default=0, ge=0, le=10**12)
     saldo: int = Field(default=0, ge=0, le=10**12)
     cuota: int = Field(default=0, ge=0, le=10**10)
     dia_pago: int = Field(default=0, ge=0, le=31)
-    quincena: str = "1"
     tasa: float = Field(default=0, ge=0, le=500)  # % efectivo anual
+    quincena: str = "1"
 
     def validar(self):
+        if self.tipo not in TIPOS:
+            raise HTTPException(422, "El tipo debe ser tarjeta o credito.")
         if self.quincena not in QUINCENAS:
             raise HTTPException(422, "La quincena debe ser 1, 2 o ambas.")
-        if self.cupo and self.saldo > self.cupo:
-            raise HTTPException(422, "El saldo no puede pasarse del cupo.")
+        if self.tope and self.saldo > self.tope:
+            raise HTTPException(422, "El saldo no puede pasarse del cupo de la tarjeta."
+                                if self.tipo == "tarjeta" else
+                                "El saldo no puede ser mayor que el valor inicial del crédito.")
         return self
 
 
@@ -384,11 +418,11 @@ def state(mes: str):
     with conn() as c:
         sueldo = cfg_get(c, "sueldo", 0)
         items = [dict(r) for r in c.execute("SELECT * FROM items ORDER BY monto DESC")]
-        tarjetas = [dict(r) for r in c.execute("SELECT * FROM tarjetas ORDER BY cuota DESC")]
+        deudas = [dict(r) for r in c.execute("SELECT * FROM deudas ORDER BY saldo DESC")]
         pagados = {(r["origen"], r["ref"], r["quincena"])
                    for r in c.execute("SELECT origen,ref,quincena FROM pagos WHERE mes=?", (mes,))}
     return {"mes": mes, "items": items, "categorias": CATEGORIAS,
-            **resumen(sueldo, items, tarjetas, pagados)}
+            **resumen(sueldo, items, deudas, pagados)}
 
 
 @app.put("/api/sueldo", dependencies=[Depends(auth)])
@@ -403,11 +437,8 @@ def set_sueldo(body: Sueldo):
 def crear_item(body: Item):
     body.validar()
     with conn() as c:
-        cur = c.execute(
-            "INSERT INTO items(nombre,monto,categoria,quincena,deuda,deuda_inicial,tasa)"
-            " VALUES(?,?,?,?,?,?,?)",
-            (body.nombre, body.monto, body.categoria, body.quincena, body.deuda,
-             body.deuda_inicial, body.tasa))
+        cur = c.execute("INSERT INTO items(nombre,monto,categoria,quincena) VALUES(?,?,?,?)",
+                        (body.nombre, body.monto, body.categoria, body.quincena))
         return {"id": cur.lastrowid, **body.model_dump()}
 
 
@@ -415,11 +446,8 @@ def crear_item(body: Item):
 def editar_item(item_id: int, body: Item):
     body.validar()
     with conn() as c:
-        cur = c.execute(
-            "UPDATE items SET nombre=?,monto=?,categoria=?,quincena=?,deuda=?,deuda_inicial=?,tasa=?"
-            " WHERE id=?",
-            (body.nombre, body.monto, body.categoria, body.quincena, body.deuda,
-             body.deuda_inicial, body.tasa, item_id))
+        cur = c.execute("UPDATE items SET nombre=?,monto=?,categoria=?,quincena=? WHERE id=?",
+                        (body.nombre, body.monto, body.categoria, body.quincena, item_id))
         if not cur.rowcount:
             raise HTTPException(404, "Ese gasto ya no existe.")
     return {"id": item_id, **body.model_dump()}
@@ -428,43 +456,43 @@ def editar_item(item_id: int, body: Item):
 @app.delete("/api/items/{item_id}", dependencies=[Depends(auth)])
 def borrar_item(item_id: int):
     with conn() as c:
-        c.execute("DELETE FROM pagos WHERE origen='item' AND ref=?", (item_id,))
+        c.execute("DELETE FROM pagos WHERE origen='gasto' AND ref=?", (item_id,))
         c.execute("DELETE FROM items WHERE id=?", (item_id,))
     return {"ok": True}
 
 
-# --- maestro: tarjetas de crédito ---
-@app.post("/api/tarjetas", dependencies=[Depends(auth)])
-def crear_tarjeta(body: Tarjeta):
+# --- maestro: tarjetas y créditos ---
+@app.post("/api/deudas", dependencies=[Depends(auth)])
+def crear_deuda(body: Deuda):
     body.validar()
     with conn() as c:
         cur = c.execute(
-            "INSERT INTO tarjetas(nombre,cupo,saldo,cuota,dia_pago,quincena,tasa)"
-            " VALUES(?,?,?,?,?,?,?)",
-            (body.nombre, body.cupo, body.saldo, body.cuota, body.dia_pago, body.quincena,
-             body.tasa))
+            "INSERT INTO deudas(nombre,tipo,tope,saldo,cuota,dia_pago,tasa,quincena)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (body.nombre, body.tipo, body.tope, body.saldo, body.cuota, body.dia_pago,
+             body.tasa, body.quincena))
         return {"id": cur.lastrowid, **body.model_dump()}
 
 
-@app.put("/api/tarjetas/{tarjeta_id}", dependencies=[Depends(auth)])
-def editar_tarjeta(tarjeta_id: int, body: Tarjeta):
+@app.put("/api/deudas/{deuda_id}", dependencies=[Depends(auth)])
+def editar_deuda(deuda_id: int, body: Deuda):
     body.validar()
     with conn() as c:
         cur = c.execute(
-            "UPDATE tarjetas SET nombre=?,cupo=?,saldo=?,cuota=?,dia_pago=?,quincena=?,tasa=?"
+            "UPDATE deudas SET nombre=?,tipo=?,tope=?,saldo=?,cuota=?,dia_pago=?,tasa=?,quincena=?"
             " WHERE id=?",
-            (body.nombre, body.cupo, body.saldo, body.cuota, body.dia_pago, body.quincena,
-             body.tasa, tarjeta_id))
+            (body.nombre, body.tipo, body.tope, body.saldo, body.cuota, body.dia_pago,
+             body.tasa, body.quincena, deuda_id))
         if not cur.rowcount:
-            raise HTTPException(404, "Esa tarjeta ya no existe.")
-    return {"id": tarjeta_id, **body.model_dump()}
+            raise HTTPException(404, "Esa deuda ya no existe.")
+    return {"id": deuda_id, **body.model_dump()}
 
 
-@app.delete("/api/tarjetas/{tarjeta_id}", dependencies=[Depends(auth)])
-def borrar_tarjeta(tarjeta_id: int):
+@app.delete("/api/deudas/{deuda_id}", dependencies=[Depends(auth)])
+def borrar_deuda(deuda_id: int):
     with conn() as c:
-        c.execute("DELETE FROM pagos WHERE origen='tarjeta' AND ref=?", (tarjeta_id,))
-        c.execute("DELETE FROM tarjetas WHERE id=?", (tarjeta_id,))
+        c.execute("DELETE FROM pagos WHERE origen='deuda' AND ref=?", (deuda_id,))
+        c.execute("DELETE FROM deudas WHERE id=?", (deuda_id,))
     return {"ok": True}
 
 
@@ -472,8 +500,8 @@ def borrar_tarjeta(tarjeta_id: int):
 def marcar_pago(body: Pago):
     if body.quincena not in ("1", "2"):
         raise HTTPException(422, "La quincena debe ser 1 o 2.")
-    if body.origen not in ("item", "tarjeta"):
-        raise HTTPException(422, "El origen debe ser item o tarjeta.")
+    if body.origen not in ("gasto", "deuda"):
+        raise HTTPException(422, "El origen debe ser gasto o deuda.")
     with conn() as c:
         if body.pagado:
             c.execute("INSERT OR IGNORE INTO pagos(mes,origen,ref,quincena) VALUES(?,?,?,?)",
@@ -494,7 +522,6 @@ if DIST.is_dir():
 
 # ---------------------------------------------------------------- autocomprobación
 def _test():
-    # Juego de datos propio, con cifras redondas, para no depender de la semilla.
     # Tasa: una efectiva anual del 26,82% es 2% mensual.
     assert abs(tasa_mensual(26.8242) - 0.02) < 1e-5, tasa_mensual(26.8242)
     assert tasa_mensual(0) == 0.0
@@ -510,7 +537,6 @@ def _test():
     assert con["interes_mes"] == 40000, con  # 2% de 2.000.000
     assert con["abono_capital"] == 460000, con
     assert 100000 < con["interes_total"] < 150000, con
-    # Un plazo más largo cobra más interés que uno corto por la misma deuda.
     assert plan_pago(2000000, 200000, 26.8242)["interes_total"] > con["interes_total"]
 
     # La cuota que no cubre ni los intereses: la deuda crece y no termina nunca.
@@ -518,37 +544,34 @@ def _test():
     assert ahoga["crece"] and ahoga["cuotas"] is None and ahoga["interes_total"] is None, ahoga
     assert plan_pago(2000000, 39999, 26.8242)["crece"]
     assert not plan_pago(2000000, 40001, 26.8242)["crece"]
+    assert plan_pago(0, 500000, 20) is None and plan_pago(2000000, 0, 20) is None
 
-    assert plan_pago(0, 500000, 20) is None      # sin saldo no hay plan
-    assert plan_pago(2000000, 0, 20) is None     # sin cuota tampoco
+    # El mismo `tope` se lee al derecho en una tarjeta y al revés en un crédito.
+    base = {"nombre": "X", "tope": 8000000, "saldo": 2000000, "cuota": 500000,
+            "dia_pago": 0, "tasa": 0, "quincena": "1"}
+    tar = mirar_deuda({**base, "tipo": "tarjeta"})
+    cre = mirar_deuda({**base, "tipo": "credito"})
+    assert (tar["categoria"], cre["categoria"]) == ("Tarjetas", "Crédito")
+    assert tar["uso"] == 0.25 and tar["disponible"] == 6000000   # usaste un cuarto del cupo
+    assert cre["avance"] == 0.75 and cre["pagado"] == 6000000    # pagaste tres cuartos
+    assert tar["plan"]["cuotas"] == 4
+    sin_tope = mirar_deuda({**base, "tipo": "tarjeta", "tope": 0})
+    assert sin_tope["uso"] is None and sin_tope["avance"] is None and sin_tope["disponible"] is None
+    assert mirar_deuda({**base, "tipo": "tarjeta", "saldo": 9999999})["uso"] == 1  # nunca pasa de 1
 
-    # Avance de un crédito: necesita el valor inicial; las cuotas no.
-    cred = {"nombre": "C", "monto": 500000, "deuda": 2000000, "deuda_inicial": 8000000, "tasa": 0}
-    a = avance_credito(cred)
-    assert (a["pagado"], a["avance"], a["cuotas_faltantes"]) == (6000000, 0.75, 4), a
-    sin_inicial = avance_credito({**cred, "deuda_inicial": 0})
-    assert sin_inicial["avance"] is None and sin_inicial["pagado"] == 0
-    assert sin_inicial["cuotas_faltantes"] == 4  # sale del saldo y la cuota
-    # Una cuota que no divide exacto deja una cuota más, no media.
-    assert avance_credito({**cred, "deuda": 2000001})["cuotas_faltantes"] == 5
-    saldado = avance_credito({**cred, "deuda": 0})
-    assert (saldado["avance"], saldado["cuotas_faltantes"]) == (1.0, None), saldado
-    recien = avance_credito({**cred, "deuda": 8000000})
-    assert recien["avance"] == 0.0 and recien["cuotas_faltantes"] == 16
-    assert avance_credito({**cred, "monto": 0})["cuotas_faltantes"] is None  # sin cuota, sin plazo
+    # Juego de datos propio, con cifras redondas, para no depender de la semilla.
+    gastos = [("Arriendo", 1000000, "Vivienda", "ambas"),
+              ("Internet", 100000, "Servicios", "2")]
+    deudas_raw = [("Tarjeta A", "tarjeta", 200000, "1"),
+                  ("Tarjeta B", "tarjeta", 300000, "2"),
+                  ("Crédito", "credito", 400000, "1")]
+    items = [{"id": n, "nombre": nom, "monto": m, "categoria": c, "quincena": q}
+             for n, (nom, m, c, q) in enumerate(gastos, 1)]
+    deudas = [{"id": n, "nombre": nom, "tipo": t, "tope": 0, "saldo": 0, "cuota": cu,
+               "dia_pago": 0, "tasa": 0, "quincena": q}
+              for n, (nom, t, cu, q) in enumerate(deudas_raw, 1)]
 
-    gastos = [("Arriendo", 1000000, "Vivienda", "ambas", 0),
-              ("Crédito", 400000, "Crédito", "1", 0),
-              ("Internet", 100000, "Servicios", "2", 0)]
-    tarj = [("Tarjeta A", 200000, "1"), ("Tarjeta B", 300000, "2")]
-    items = [{"id": n, "nombre": nom, "monto": m, "categoria": c, "quincena": q, "deuda": d,
-              "deuda_inicial": 0, "tasa": 0}
-             for n, (nom, m, c, q, d) in enumerate(gastos, 1)]
-    tarjetas = [{"id": n, "nombre": nom, "cupo": 0, "saldo": 0, "cuota": cu, "dia_pago": 0,
-                 "quincena": q, "tasa": 0}
-                for n, (nom, cu, q) in enumerate(tarj, 1)]
-
-    r = resumen(2400000, items, tarjetas, pagados={("item", 1, "1")})
+    r = resumen(2400000, items, deudas, pagados={("gasto", 1, "1")})
     assert r["total"] == 2000000, r["total"]
     assert r["libre"] == 400000, r["libre"]
     q1, q2 = r["por_quincena"]
@@ -562,34 +585,23 @@ def _test():
     assert [c["categoria"] for c in r["por_categoria"]] == \
         [c for c in CATEGORIAS_GRAFICO if c in {x["categoria"] for x in r["por_categoria"]}]
 
-    # Un item y una tarjeta con el mismo id no se confunden al marcar el pago.
-    solo_item = resumen(2400000, items, tarjetas, pagados={("item", 2, "1")})
-    solo_tarj = resumen(2400000, items, tarjetas, pagados={("tarjeta", 2, "2")})
-    assert solo_item["por_quincena"][0]["pagado"] == 400000  # el crédito
-    assert solo_tarj["por_quincena"][1]["pagado"] == 300000  # la tarjeta B
+    # Un gasto y una deuda con el mismo id no se confunden al marcar el pago.
+    solo_gasto = resumen(2400000, items, deudas, pagados={("gasto", 2, "2")})
+    solo_deuda = resumen(2400000, items, deudas, pagados={("deuda", 2, "2")})
+    assert solo_gasto["por_quincena"][1]["pagado"] == 100000  # Internet
+    assert solo_deuda["por_quincena"][1]["pagado"] == 300000  # Tarjeta B
 
-    # Cupo y saldo salen de las tarjetas; la deuda del crédito, de los gastos.
-    con_cupo = [{**t, "cupo": 2000000, "saldo": 500000} for t in tarjetas]
-    con_credito = [{**i, "deuda": 6000000 if i["nombre"] == "Crédito" else 0} for i in items]
-    r2 = resumen(2400000, con_credito, con_cupo, pagados=set())
-    assert r2["cupo_total"] == 4000000 and r2["cupo_disponible"] == 3000000
-    assert r2["deuda_total"] == 1000000 + 6000000, r2["deuda_total"]
+    # El cupo es solo de las tarjetas; un crédito no tiene cupo rotativo.
+    con_cifras = [{**d, "tope": 2000000, "saldo": 500000} for d in deudas]
+    r2 = resumen(2400000, items, con_cifras, pagados=set())
+    assert r2["cupo_total"] == 4000000 and r2["cupo_disponible"] == 3000000, r2["cupo_total"]
+    assert r2["deuda_total"] == 1500000, r2["deuda_total"]
     assert r2["interes_mes"] == 0, "sin tasa registrada, nada del pago es interes"
 
-    # Con tasa, el resumen dice cuanto de las cuotas del mes es solo interes.
-    r3 = resumen(2400000, [{**i, "tasa": 26.8242} for i in con_credito],
-                 [{**t, "tasa": 26.8242} for t in con_cupo], pagados=set())
-    assert r3["interes_mes"] == round(500000 * 0.02) * 2 + round(6000000 * 0.02), r3["interes_mes"]
-    assert all(t["plan"] for t in r3["tarjetas"]), "cada tarjeta con saldo trae su plan"
-
-    # Las dos semillas se leen y tienen la forma que init_db espera.
-    for f in ("semilla.json", "semilla.example.json"):
-        if not (BASE / f).is_file():
-            continue
-        d = json.loads((BASE / f).read_text(encoding="utf-8"))
-        assert isinstance(d["sueldo"], int) and d["sueldo"] > 0, f
-        assert all(len(g) == 5 and g[2] in CATEGORIAS and g[3] in QUINCENAS for g in d["gastos"]), f
-        assert all(len(t) == 3 and t[2] in QUINCENAS for t in d["tarjetas"]), f
+    r3 = resumen(2400000, items, [{**d, "tope": 2000000, "saldo": 500000, "tasa": 26.8242}
+                                  for d in deudas], pagados=set())
+    assert r3["interes_mes"] == round(500000 * 0.02) * 3, r3["interes_mes"]
+    assert all(d["plan"] for d in r3["deudas"])
 
     s = secrets.token_hex(16)
     t = sign_token(s, int(time.time()) + 60)
@@ -610,7 +622,15 @@ def _test():
     os.environ["FINANZAS_USER"] = "ya-estaba"
     cargar_env(env)
     assert os.environ["FINANZAS_USER"] == "ya-estaba"  # el entorno manda sobre el .env
-    print("OK — cálculo, dos maestros, token y .env")
+
+    for f in ("semilla.json", "semilla.example.json"):
+        if not (BASE / f).is_file():
+            continue
+        d = json.loads((BASE / f).read_text(encoding="utf-8"))
+        assert isinstance(d["sueldo"], int) and d["sueldo"] > 0, f
+        assert all(len(g) == 4 and g[2] in CATEGORIAS and g[3] in QUINCENAS for g in d["gastos"]), f
+        assert all(len(x) == 4 and x[1] in TIPOS and x[3] in QUINCENAS for x in d["deudas"]), f
+    print("OK — cálculo, un maestro de deudas, token y .env")
 
 
 if __name__ == "__main__":
