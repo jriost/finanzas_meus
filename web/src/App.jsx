@@ -194,9 +194,11 @@ function Resumen({ data }) {
           <div className="k">Deuda total</div>
           <div className="v num">{deuda_total ? money(deuda_total) : "—"}</div>
           <div className="s">
-            {deuda_total
-              ? `${money(cuota_deuda)} de cuota al mes`
-              : `${money(cuota_deuda)} al mes · registra tus saldos`}
+            {!deuda_total
+              ? `${money(cuota_deuda)} al mes · registra tus saldos`
+              : data.interes_mes
+                ? `${money(cuota_deuda)} de cuota · ${money(data.interes_mes)} son interés`
+                : `${money(cuota_deuda)} de cuota al mes`}
           </div>
         </div>
         <div className="tile lead">
@@ -293,6 +295,25 @@ function Quincenas({ data, mes, nombre, accion }) {
 }
 
 /* ----------------------------------------------------------------- deudas */
+const tasaTexto = (t) => `${t.toLocaleString("es-CO", { maximumFractionDigits: 2 })}% E.A.`;
+
+/** Qué parte de la próxima cuota se va en intereses, o el aviso si no alcanza. */
+function Interes({ plan, tasa }) {
+  if (!plan || !tasa) return <div className="pie">Registra la tasa para ver cuánto es interés</div>;
+  if (plan.crece) {
+    return (
+      <div className="pie alerta num">
+        La cuota no cubre los {money(plan.interes_mes)} de interés: la deuda crece cada mes
+      </div>
+    );
+  }
+  return (
+    <div className="pie num">
+      De la cuota, <b>{money(plan.interes_mes)}</b> son interés y {money(plan.abono_capital)} bajan la deuda
+    </div>
+  );
+}
+
 function Deudas({ data, mes }) {
   const { tarjetas, creditos, deuda_total, cuota_deuda, cupo_total, cupo_disponible } = data;
   // Si sigues pagando la misma cuota, el mes en que lo terminas de pagar.
@@ -317,6 +338,7 @@ function Deudas({ data, mes }) {
               <div className="nm">
                 <span className="dot" style={{ background: color("Tarjetas") }} />
                 <span>{t.nombre}</span>
+                {t.tasa ? <span className="tasa num">{tasaTexto(t.tasa)}</span> : null}
               </div>
               <div className="cuota num">
                 {money(t.cuota)} <small>cuota al mes</small>
@@ -334,7 +356,9 @@ function Deudas({ data, mes }) {
                 {t.cupo
                   ? `${money(t.cupo - t.saldo)} libres de ${money(t.cupo)}`
                   : "Cupo sin registrar"}
+                {t.plan && !t.plan.crece ? ` · ${t.plan.cuotas} cuotas para saldarla` : ""}
               </div>
+              <Interes plan={t.plan} tasa={t.tasa} />
             </div>
           );
         })}
@@ -344,6 +368,7 @@ function Deudas({ data, mes }) {
             <div className="nm">
               <span className="dot" style={{ background: color("Crédito") }} />
               <span>{c.nombre}</span>
+              {c.tasa ? <span className="tasa num">{tasaTexto(c.tasa)}</span> : null}
             </div>
             <div className="cuota num">
               {money(c.monto)} <small>cuota al mes</small>
@@ -371,6 +396,7 @@ function Deudas({ data, mes }) {
                 </>
               )}
             </div>
+            <Interes plan={c.plan} tasa={c.tasa} />
           </div>
         ))}
       </div>
@@ -379,8 +405,8 @@ function Deudas({ data, mes }) {
 }
 
 /* --------------------------------------------------------------- maestros */
-const GASTO_NUEVO = { nombre: "Nuevo gasto", monto: 0, categoria: "Otros", quincena: "1", deuda: 0, deuda_inicial: 0 };
-const TARJETA_NUEVA = { nombre: "Nueva tarjeta", cupo: 0, saldo: 0, cuota: 0, dia_pago: 0, quincena: "1" };
+const GASTO_NUEVO = { nombre: "Nuevo gasto", monto: 0, categoria: "Otros", quincena: "1", deuda: 0, deuda_inicial: 0, tasa: 0 };
+const TARJETA_NUEVA = { nombre: "Nueva tarjeta", cupo: 0, saldo: 0, cuota: 0, dia_pago: 0, quincena: "1", tasa: 0 };
 
 function SelectQuincena({ value, onChange }) {
   return (
@@ -401,8 +427,8 @@ function Maestros({ data, accion }) {
       })
     );
 
-  const CAMPOS_GASTO = ["nombre", "monto", "categoria", "quincena", "deuda", "deuda_inicial"];
-  const CAMPOS_TARJETA = ["nombre", "cupo", "saldo", "cuota", "dia_pago", "quincena"];
+  const CAMPOS_GASTO = ["nombre", "monto", "categoria", "quincena", "deuda", "deuda_inicial", "tasa"];
+  const CAMPOS_TARJETA = ["nombre", "cupo", "saldo", "cuota", "dia_pago", "quincena", "tasa"];
 
   return (
     <section>
@@ -434,6 +460,7 @@ function Maestros({ data, accion }) {
                   <th style={{ minWidth: 115 }}>Saldo que debes</th>
                   <th style={{ minWidth: 115 }}>Cuota mensual</th>
                   <th style={{ minWidth: 80 }}>Día de pago</th>
+                  <th style={{ minWidth: 100 }}>Tasa % E.A.</th>
                   <th style={{ minWidth: 120 }}>Se paga</th>
                   <th />
                 </tr>
@@ -477,6 +504,19 @@ function Maestros({ data, accion }) {
                       />
                     </td>
                     <td>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        max="500"
+                        placeholder="—"
+                        defaultValue={t.tasa || ""}
+                        onBlur={(e) =>
+                          guardar("/tarjetas", t, CAMPOS_TARJETA, { tasa: +e.target.value || 0 })
+                        }
+                      />
+                    </td>
+                    <td>
                       <SelectQuincena
                         value={t.quincena}
                         onChange={(e) => guardar("/tarjetas", t, CAMPOS_TARJETA, { quincena: e.target.value })}
@@ -516,6 +556,7 @@ function Maestros({ data, accion }) {
                   <th style={{ minWidth: 120 }}>Se paga</th>
                   <th style={{ minWidth: 120 }}>Saldo que debes</th>
                   <th style={{ minWidth: 130 }}>Empezó en</th>
+                  <th style={{ minWidth: 100 }}>Tasa % E.A.</th>
                   <th />
                 </tr>
               </thead>
@@ -577,6 +618,21 @@ function Maestros({ data, accion }) {
                           onBlur={(e) =>
                             guardar("/items", it, CAMPOS_GASTO, { deuda_inicial: +e.target.value || 0 })
                           }
+                        />
+                      ) : (
+                        <span className="vacio">—</span>
+                      )}
+                    </td>
+                    <td>
+                      {it.categoria === "Crédito" ? (
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          max="500"
+                          placeholder="—"
+                          defaultValue={it.tasa || ""}
+                          onBlur={(e) => guardar("/items", it, CAMPOS_GASTO, { tasa: +e.target.value || 0 })}
                         />
                       ) : (
                         <span className="vacio">—</span>

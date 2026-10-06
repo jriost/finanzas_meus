@@ -98,12 +98,13 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nombre TEXT NOT NULL, monto INTEGER NOT NULL,
             categoria TEXT NOT NULL, quincena TEXT NOT NULL, deuda INTEGER NOT NULL DEFAULT 0,
-            deuda_inicial INTEGER NOT NULL DEFAULT 0);
+            deuda_inicial INTEGER NOT NULL DEFAULT 0, tasa REAL NOT NULL DEFAULT 0);
           CREATE TABLE IF NOT EXISTS tarjetas(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nombre TEXT NOT NULL, cupo INTEGER NOT NULL DEFAULT 0,
             saldo INTEGER NOT NULL DEFAULT 0, cuota INTEGER NOT NULL DEFAULT 0,
-            dia_pago INTEGER NOT NULL DEFAULT 0, quincena TEXT NOT NULL DEFAULT '1');
+            dia_pago INTEGER NOT NULL DEFAULT 0, quincena TEXT NOT NULL DEFAULT '1',
+            tasa REAL NOT NULL DEFAULT 0);
           CREATE TABLE IF NOT EXISTS pagos(
             mes TEXT NOT NULL, origen TEXT NOT NULL, ref INTEGER NOT NULL, quincena TEXT NOT NULL,
             PRIMARY KEY(mes, origen, ref, quincena));
@@ -112,6 +113,11 @@ def init_db():
         # Bases creadas antes de que un crédito guardara con cuánto empezó.
         if "deuda_inicial" not in columnas(c, "items"):
             c.execute("ALTER TABLE items ADD COLUMN deuda_inicial INTEGER NOT NULL DEFAULT 0")
+
+        # Bases creadas antes de que se registrara la tasa de interés.
+        for tabla in ("items", "tarjetas"):
+            if "tasa" not in columnas(c, tabla):
+                c.execute(f"ALTER TABLE {tabla} ADD COLUMN tasa REAL NOT NULL DEFAULT 0")
 
         # Bases creadas antes de que las tarjetas fueran su propio maestro.
         if "item_id" in columnas(c, "pagos"):
@@ -192,20 +198,56 @@ def parte_quincena(c: dict, q: str) -> int:
     return c["monto"] if c["quincena"] == q else 0
 
 
+TOPE_CUOTAS = 600  # 50 años: más allá de eso la deuda no se está pagando
+
+
+def tasa_mensual(tasa_ea: float) -> float:
+    """Mensual equivalente a una efectiva anual, que es como se citan en Colombia."""
+    return (1 + tasa_ea / 100) ** (1 / 12) - 1 if tasa_ea else 0.0
+
+
+def plan_pago(saldo: int, cuota: int, tasa_ea: float) -> dict | None:
+    """Cuántas cuotas faltan, y cuánto de la próxima es interés y cuánto capital.
+
+    Amortiza mes a mes en vez de dividir saldo entre cuota: con intereses esa
+    división subestima el plazo. Sin tasa registrada da lo mismo que dividir.
+    `crece` avisa el caso feo: la cuota no alcanza ni para los intereses, así
+    que el saldo sube cada mes y la deuda nunca termina.
+    """
+    if saldo <= 0 or cuota <= 0:
+        return None
+    i = tasa_mensual(tasa_ea)
+    interes_mes = round(saldo * i)
+    if cuota <= saldo * i:
+        return {"cuotas": None, "interes_mes": interes_mes, "abono_capital": 0,
+                "interes_total": None, "crece": True}
+
+    restante, cuotas, interes = float(saldo), 0, 0.0
+    while restante > 0 and cuotas < TOPE_CUOTAS:
+        cargo = restante * i
+        restante += cargo - cuota
+        interes += cargo
+        cuotas += 1
+    return {"cuotas": cuotas, "interes_mes": interes_mes,
+            "abono_capital": cuota - interes_mes, "interes_total": round(interes), "crece": False}
+
+
 def avance_credito(credito: dict) -> dict:
     """Cuánto llevas pagado de un crédito y cuánto falta para saldarlo.
 
     `avance` solo existe si registraste con cuánto empezó el crédito: sin ese
     dato no hay meta contra la cual medir. Las cuotas que faltan sí salen del
-    saldo y la cuota, aunque no sepas el valor inicial.
+    saldo, la cuota y la tasa, aunque no sepas el valor inicial.
     """
-    inicial, saldo, cuota = credito["deuda_inicial"], credito["deuda"], credito["monto"]
+    inicial, saldo = credito["deuda_inicial"], credito["deuda"]
     pagado = max(0, inicial - saldo) if inicial else 0
+    plan = plan_pago(saldo, credito["monto"], credito.get("tasa", 0))
     return {
         **credito,
         "pagado": pagado,
         "avance": round(pagado / inicial, 4) if inicial else None,
-        "cuotas_faltantes": -(-saldo // cuota) if cuota and saldo else None,
+        "cuotas_faltantes": plan["cuotas"] if plan else None,
+        "plan": plan,
     }
 
 
@@ -237,9 +279,13 @@ def resumen(sueldo: int, items: list[dict], tarjetas: list[dict],
         for cat in CATEGORIAS_GRAFICO
     ]
     creditos = [avance_credito(i) for i in items if i["categoria"] == "Crédito"]
+    tarjetas = [{**t, "plan": plan_pago(t["saldo"], t["cuota"], t.get("tasa", 0))} for t in tarjetas]
     cupo = sum(t["cupo"] for t in tarjetas)
     saldo = sum(t["saldo"] for t in tarjetas)
+    planes = [d["plan"] for d in (*tarjetas, *creditos) if d["plan"]]
     return {
+        "tarjetas": tarjetas,
+        "interes_mes": sum(p["interes_mes"] for p in planes),
         "sueldo": sueldo,
         "total": total,
         "libre": sueldo - total,
@@ -267,6 +313,7 @@ class Item(BaseModel):
     quincena: str
     deuda: int = Field(default=0, ge=0, le=10**12)
     deuda_inicial: int = Field(default=0, ge=0, le=10**12)
+    tasa: float = Field(default=0, ge=0, le=500)  # % efectivo anual
 
     def validar(self):
         if self.categoria not in CATEGORIAS:
@@ -285,6 +332,7 @@ class Tarjeta(BaseModel):
     cuota: int = Field(default=0, ge=0, le=10**10)
     dia_pago: int = Field(default=0, ge=0, le=31)
     quincena: str = "1"
+    tasa: float = Field(default=0, ge=0, le=500)  # % efectivo anual
 
     def validar(self):
         if self.quincena not in QUINCENAS:
@@ -339,10 +387,8 @@ def state(mes: str):
         tarjetas = [dict(r) for r in c.execute("SELECT * FROM tarjetas ORDER BY cuota DESC")]
         pagados = {(r["origen"], r["ref"], r["quincena"])
                    for r in c.execute("SELECT origen,ref,quincena FROM pagos WHERE mes=?", (mes,))}
-    return {
-        "mes": mes, "items": items, "tarjetas": tarjetas, "categorias": CATEGORIAS,
-        **resumen(sueldo, items, tarjetas, pagados),
-    }
+    return {"mes": mes, "items": items, "categorias": CATEGORIAS,
+            **resumen(sueldo, items, tarjetas, pagados)}
 
 
 @app.put("/api/sueldo", dependencies=[Depends(auth)])
@@ -358,8 +404,10 @@ def crear_item(body: Item):
     body.validar()
     with conn() as c:
         cur = c.execute(
-            "INSERT INTO items(nombre,monto,categoria,quincena,deuda,deuda_inicial) VALUES(?,?,?,?,?,?)",
-            (body.nombre, body.monto, body.categoria, body.quincena, body.deuda, body.deuda_inicial))
+            "INSERT INTO items(nombre,monto,categoria,quincena,deuda,deuda_inicial,tasa)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (body.nombre, body.monto, body.categoria, body.quincena, body.deuda,
+             body.deuda_inicial, body.tasa))
         return {"id": cur.lastrowid, **body.model_dump()}
 
 
@@ -368,9 +416,10 @@ def editar_item(item_id: int, body: Item):
     body.validar()
     with conn() as c:
         cur = c.execute(
-            "UPDATE items SET nombre=?,monto=?,categoria=?,quincena=?,deuda=?,deuda_inicial=? WHERE id=?",
-            (body.nombre, body.monto, body.categoria, body.quincena, body.deuda, body.deuda_inicial,
-             item_id))
+            "UPDATE items SET nombre=?,monto=?,categoria=?,quincena=?,deuda=?,deuda_inicial=?,tasa=?"
+            " WHERE id=?",
+            (body.nombre, body.monto, body.categoria, body.quincena, body.deuda,
+             body.deuda_inicial, body.tasa, item_id))
         if not cur.rowcount:
             raise HTTPException(404, "Ese gasto ya no existe.")
     return {"id": item_id, **body.model_dump()}
@@ -390,8 +439,10 @@ def crear_tarjeta(body: Tarjeta):
     body.validar()
     with conn() as c:
         cur = c.execute(
-            "INSERT INTO tarjetas(nombre,cupo,saldo,cuota,dia_pago,quincena) VALUES(?,?,?,?,?,?)",
-            (body.nombre, body.cupo, body.saldo, body.cuota, body.dia_pago, body.quincena))
+            "INSERT INTO tarjetas(nombre,cupo,saldo,cuota,dia_pago,quincena,tasa)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (body.nombre, body.cupo, body.saldo, body.cuota, body.dia_pago, body.quincena,
+             body.tasa))
         return {"id": cur.lastrowid, **body.model_dump()}
 
 
@@ -400,8 +451,10 @@ def editar_tarjeta(tarjeta_id: int, body: Tarjeta):
     body.validar()
     with conn() as c:
         cur = c.execute(
-            "UPDATE tarjetas SET nombre=?,cupo=?,saldo=?,cuota=?,dia_pago=?,quincena=? WHERE id=?",
-            (body.nombre, body.cupo, body.saldo, body.cuota, body.dia_pago, body.quincena, tarjeta_id))
+            "UPDATE tarjetas SET nombre=?,cupo=?,saldo=?,cuota=?,dia_pago=?,quincena=?,tasa=?"
+            " WHERE id=?",
+            (body.nombre, body.cupo, body.saldo, body.cuota, body.dia_pago, body.quincena,
+             body.tasa, tarjeta_id))
         if not cur.rowcount:
             raise HTTPException(404, "Esa tarjeta ya no existe.")
     return {"id": tarjeta_id, **body.model_dump()}
@@ -442,8 +495,35 @@ if DIST.is_dir():
 # ---------------------------------------------------------------- autocomprobación
 def _test():
     # Juego de datos propio, con cifras redondas, para no depender de la semilla.
+    # Tasa: una efectiva anual del 26,82% es 2% mensual.
+    assert abs(tasa_mensual(26.8242) - 0.02) < 1e-5, tasa_mensual(26.8242)
+    assert tasa_mensual(0) == 0.0
+
+    # Sin tasa, amortizar es dividir saldo entre cuota.
+    assert plan_pago(2000000, 500000, 0)["cuotas"] == 4
+    assert plan_pago(2000001, 500000, 0)["cuotas"] == 5  # el resto deja otra cuota
+    assert plan_pago(2000000, 500000, 0)["interes_total"] == 0
+
+    # Con tasa, la misma deuda tarda más y el interés se nota.
+    con = plan_pago(2000000, 500000, 26.8242)
+    assert con["cuotas"] == 5, con          # 4 cuotas ya no alcanzan
+    assert con["interes_mes"] == 40000, con  # 2% de 2.000.000
+    assert con["abono_capital"] == 460000, con
+    assert 100000 < con["interes_total"] < 150000, con
+    # Un plazo más largo cobra más interés que uno corto por la misma deuda.
+    assert plan_pago(2000000, 200000, 26.8242)["interes_total"] > con["interes_total"]
+
+    # La cuota que no cubre ni los intereses: la deuda crece y no termina nunca.
+    ahoga = plan_pago(2000000, 40000, 26.8242)
+    assert ahoga["crece"] and ahoga["cuotas"] is None and ahoga["interes_total"] is None, ahoga
+    assert plan_pago(2000000, 39999, 26.8242)["crece"]
+    assert not plan_pago(2000000, 40001, 26.8242)["crece"]
+
+    assert plan_pago(0, 500000, 20) is None      # sin saldo no hay plan
+    assert plan_pago(2000000, 0, 20) is None     # sin cuota tampoco
+
     # Avance de un crédito: necesita el valor inicial; las cuotas no.
-    cred = {"nombre": "C", "monto": 500000, "deuda": 2000000, "deuda_inicial": 8000000}
+    cred = {"nombre": "C", "monto": 500000, "deuda": 2000000, "deuda_inicial": 8000000, "tasa": 0}
     a = avance_credito(cred)
     assert (a["pagado"], a["avance"], a["cuotas_faltantes"]) == (6000000, 0.75, 4), a
     sin_inicial = avance_credito({**cred, "deuda_inicial": 0})
@@ -462,9 +542,10 @@ def _test():
               ("Internet", 100000, "Servicios", "2", 0)]
     tarj = [("Tarjeta A", 200000, "1"), ("Tarjeta B", 300000, "2")]
     items = [{"id": n, "nombre": nom, "monto": m, "categoria": c, "quincena": q, "deuda": d,
-              "deuda_inicial": 0}
+              "deuda_inicial": 0, "tasa": 0}
              for n, (nom, m, c, q, d) in enumerate(gastos, 1)]
-    tarjetas = [{"id": n, "nombre": nom, "cupo": 0, "saldo": 0, "cuota": cu, "dia_pago": 0, "quincena": q}
+    tarjetas = [{"id": n, "nombre": nom, "cupo": 0, "saldo": 0, "cuota": cu, "dia_pago": 0,
+                 "quincena": q, "tasa": 0}
                 for n, (nom, cu, q) in enumerate(tarj, 1)]
 
     r = resumen(2400000, items, tarjetas, pagados={("item", 1, "1")})
@@ -493,6 +574,13 @@ def _test():
     r2 = resumen(2400000, con_credito, con_cupo, pagados=set())
     assert r2["cupo_total"] == 4000000 and r2["cupo_disponible"] == 3000000
     assert r2["deuda_total"] == 1000000 + 6000000, r2["deuda_total"]
+    assert r2["interes_mes"] == 0, "sin tasa registrada, nada del pago es interes"
+
+    # Con tasa, el resumen dice cuanto de las cuotas del mes es solo interes.
+    r3 = resumen(2400000, [{**i, "tasa": 26.8242} for i in con_credito],
+                 [{**t, "tasa": 26.8242} for t in con_cupo], pagados=set())
+    assert r3["interes_mes"] == round(500000 * 0.02) * 2 + round(6000000 * 0.02), r3["interes_mes"]
+    assert all(t["plan"] for t in r3["tarjetas"]), "cada tarjeta con saldo trae su plan"
 
     # Las dos semillas se leen y tienen la forma que init_db espera.
     for f in ("semilla.json", "semilla.example.json"):
