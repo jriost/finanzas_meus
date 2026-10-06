@@ -168,6 +168,10 @@ def init_db():
             saldo INTEGER NOT NULL DEFAULT 0, cuota INTEGER NOT NULL DEFAULT 0,
             dia_pago INTEGER NOT NULL DEFAULT 0, tasa REAL NOT NULL DEFAULT 0,
             quincena TEXT NOT NULL DEFAULT '1');
+          CREATE TABLE IF NOT EXISTS bonos(
+            mes TEXT NOT NULL, quincena TEXT NOT NULL,
+            monto INTEGER NOT NULL, nota TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(mes, quincena));
           CREATE TABLE IF NOT EXISTS pagos(
             mes TEXT NOT NULL, origen TEXT NOT NULL, ref INTEGER NOT NULL, quincena TEXT NOT NULL,
             PRIMARY KEY(mes, origen, ref, quincena));
@@ -287,7 +291,10 @@ def parte_quincena(c: dict, q: str) -> int:
 
 
 def resumen(sueldo: int, items: list[dict], deudas: list[dict],
-            pagados: set[tuple[str, int, str]]) -> dict:
+            pagados: set[tuple[str, int, str]], bonos: dict[str, dict] | None = None) -> dict:
+    """Los números del mes. `bonos` son los de ese mes, por quincena: entran como
+    ingreso extra, así que un mes con bono deja más libre que uno sin él."""
+    bonos = bonos or {}
     lista = compromisos(items, deudas)
     total = sum(c["monto"] for c in lista)
 
@@ -300,14 +307,20 @@ def resumen(sueldo: int, items: list[dict], deudas: list[dict],
         ]
         filas.sort(key=lambda f: -f["parte"])
         debe = sum(f["parte"] for f in filas)
+        bono = bonos.get(q)
+        sueldo_q = round(sueldo / 2)
+        ingreso = sueldo_q + (bono["monto"] if bono else 0)
         por_quincena.append({
             "quincena": q,
-            "ingreso": round(sueldo / 2),
+            "sueldo": sueldo_q,
+            "bono": bono,
+            "ingreso": ingreso,
             "debe": debe,
             "pagado": sum(f["parte"] for f in filas if f["pagado"]),
-            "libre": round(sueldo / 2) - debe,
+            "libre": ingreso - debe,
             "filas": filas,
         })
+    bono_mes = sum(q["bono"]["monto"] for q in por_quincena if q["bono"])
 
     por_categoria = [
         {"categoria": cat, "monto": sum(c["monto"] for c in lista if c["categoria"] == cat)}
@@ -319,8 +332,10 @@ def resumen(sueldo: int, items: list[dict], deudas: list[dict],
     usado = sum(t["saldo"] for t in tarjetas)
     return {
         "sueldo": sueldo,
+        "bono_mes": bono_mes,
+        "ingreso_mes": sueldo + bono_mes,
         "total": total,
-        "libre": sueldo - total,
+        "libre": sueldo + bono_mes - total,
         "pendientes": sum(1 for q in por_quincena for f in q["filas"] if not f["pagado"]),
         "por_quincena": por_quincena,
         "por_categoria": [c for c in por_categoria if c["monto"] > 0],
@@ -380,6 +395,13 @@ class Sueldo(BaseModel):
     sueldo: int = Field(ge=0, le=10**10)
 
 
+class Bono(BaseModel):
+    mes: str = Field(pattern=r"^\d{4}-\d{2}$")
+    quincena: str
+    monto: int = Field(ge=0, le=10**10)
+    nota: str = Field(default="", max_length=60)
+
+
 class Pago(BaseModel):
     mes: str = Field(pattern=r"^\d{4}-\d{2}$")
     origen: str
@@ -421,8 +443,10 @@ def state(mes: str):
         deudas = [dict(r) for r in c.execute("SELECT * FROM deudas ORDER BY saldo DESC")]
         pagados = {(r["origen"], r["ref"], r["quincena"])
                    for r in c.execute("SELECT origen,ref,quincena FROM pagos WHERE mes=?", (mes,))}
+        bonos = {r["quincena"]: {"monto": r["monto"], "nota": r["nota"]}
+                 for r in c.execute("SELECT quincena,monto,nota FROM bonos WHERE mes=?", (mes,))}
     return {"mes": mes, "items": items, "categorias": CATEGORIAS,
-            **resumen(sueldo, items, deudas, pagados)}
+            **resumen(sueldo, items, deudas, pagados, bonos)}
 
 
 @app.put("/api/sueldo", dependencies=[Depends(auth)])
@@ -493,6 +517,22 @@ def borrar_deuda(deuda_id: int):
     with conn() as c:
         c.execute("DELETE FROM pagos WHERE origen='deuda' AND ref=?", (deuda_id,))
         c.execute("DELETE FROM deudas WHERE id=?", (deuda_id,))
+    return {"ok": True}
+
+
+@app.post("/api/bonos", dependencies=[Depends(auth)])
+def guardar_bono(body: Bono):
+    """Un bono por quincena. Monto en cero lo borra, que es como se quita."""
+    if body.quincena not in ("1", "2"):
+        raise HTTPException(422, "La quincena debe ser 1 o 2.")
+    with conn() as c:
+        if body.monto:
+            c.execute("INSERT INTO bonos(mes,quincena,monto,nota) VALUES(?,?,?,?)"
+                      " ON CONFLICT(mes,quincena) DO UPDATE SET monto=excluded.monto,"
+                      " nota=excluded.nota",
+                      (body.mes, body.quincena, body.monto, body.nota.strip()))
+        else:
+            c.execute("DELETE FROM bonos WHERE mes=? AND quincena=?", (body.mes, body.quincena))
     return {"ok": True}
 
 
@@ -584,6 +624,28 @@ def _test():
     assert sum(c["monto"] for c in r["por_categoria"]) == r["total"]
     assert [c["categoria"] for c in r["por_categoria"]] == \
         [c for c in CATEGORIAS_GRAFICO if c in {x["categoria"] for x in r["por_categoria"]}]
+
+    # Un bono entra como ingreso de su quincena y solo de esa.
+    con_bono = resumen(2400000, items, deudas, pagados=set(),
+                       bonos={"1": {"monto": 600000, "nota": "Prima"}})
+    b1, b2 = con_bono["por_quincena"]
+    assert (b1["sueldo"], b1["ingreso"]) == (1200000, 1800000), b1
+    assert b1["bono"]["nota"] == "Prima" and b2["bono"] is None
+    assert (b2["sueldo"], b2["ingreso"]) == (1200000, 1200000), b2
+    assert b1["libre"] == 1800000 - b1["debe"], b1      # el bono sube lo libre de la quincena
+    assert b2["libre"] == r["por_quincena"][1]["libre"]  # la otra quincena no cambia
+    assert con_bono["bono_mes"] == 600000
+    assert con_bono["ingreso_mes"] == 2400000 + 600000
+    assert con_bono["libre"] == r["libre"] + 600000, con_bono["libre"]
+    assert con_bono["total"] == r["total"], "un bono no es un gasto"
+
+    # Bonos en las dos quincenas se suman; sin bonos nada cambia.
+    dos = resumen(2400000, items, deudas, pagados=set(),
+                  bonos={"1": {"monto": 100000, "nota": ""}, "2": {"monto": 50000, "nota": "Bono"}})
+    assert dos["bono_mes"] == 150000 and dos["libre"] == r["libre"] + 150000
+    sin = resumen(2400000, items, deudas, pagados=set(), bonos={})
+    assert sin["bono_mes"] == 0 and sin["libre"] == r["libre"]
+    assert all(q["bono"] is None for q in sin["por_quincena"])
 
     # Un gasto y una deuda con el mismo id no se confunden al marcar el pago.
     solo_gasto = resumen(2400000, items, deudas, pagados={("gasto", 2, "2")})

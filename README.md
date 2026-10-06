@@ -72,7 +72,7 @@ cd backend; python app.py --test    # cálculo quincenal, token y lectura del .e
 | Ruta | Qué es |
 |---|---|
 | `backend/app.py` | API completa: login, maestros, pagos y los números calculados |
-| `backend/finanzas.db` | SQLite: `items` y `deudas` (los maestros), `pagos` (por mes) y `config` (sueldo) |
+| `backend/finanzas.db` | SQLite: `items` y `deudas` (los maestros), `pagos` y `bonos` (por mes) y `config` (sueldo) |
 | `backend/semilla.json` | Con que se llena una base vacia. Tus cifras, no va a git; `semilla.example.json` es la plantilla |
 | `.env` | Tu usuario y contraseña. No va a git |
 | `deploy.ps1` | Compila y publica en el servidor |
@@ -82,6 +82,10 @@ cd backend; python app.py --test    # cálculo quincenal, token y lectura del .e
 Los conceptos marcados como **ambas** quincenas se parten por la mitad en cada
 una. Los pagos se guardan por mes, así que cambiar de mes empieza la lista en
 limpio sin perder el historial.
+
+Los **bonos** son ingreso suelto de una quincena concreta, no un maestro: se
+guardan por mes igual que los pagos, suman al ingreso de esa quincena y
+desaparecen al cambiar de mes. Guardar uno en cero lo borra.
 
 Lo que debes vive aparte de lo que gastas: un gasto fijo solo tiene monto,
 categoría y quincena, mientras que una **deuda** —tarjeta o crédito— lleva

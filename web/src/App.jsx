@@ -186,9 +186,13 @@ function Resumen({ data }) {
 
       <div className="tiles">
         <div className="tile">
-          <div className="k">Sueldo del mes</div>
-          <div className="v num">{money(sueldo)}</div>
-          <div className="s">{money(sueldo / 2)} por quincena</div>
+          <div className="k">{data.bono_mes ? "Ingresos del mes" : "Sueldo del mes"}</div>
+          <div className="v num">{money(data.ingreso_mes)}</div>
+          <div className="s num">
+            {data.bono_mes
+              ? `${money(sueldo)} de sueldo + ${money(data.bono_mes)} de bonos`
+              : `${money(sueldo / 2)} por quincena`}
+          </div>
         </div>
         <div className="tile">
           <div className="k">Deuda total</div>
@@ -244,6 +248,66 @@ function Resumen({ data }) {
 }
 
 /* --------------------------------------------------------------- quincenas */
+/** El bono de una quincena: un ingreso suelto de ese mes, no un gasto fijo. */
+function Bono({ q, mes, accion }) {
+  const [abierto, setAbierto] = useState(false);
+  const [monto, setMonto] = useState(q.bono?.monto ?? "");
+  const [nota, setNota] = useState(q.bono?.nota ?? "");
+
+  const guardar = (e) => {
+    e.preventDefault();
+    setAbierto(false);
+    accion(() =>
+      api("/bonos", {
+        method: "POST",
+        body: { mes, quincena: q.quincena, monto: +monto || 0, nota },
+      })
+    );
+  };
+
+  if (abierto) {
+    return (
+      <form className="bono edit" onSubmit={guardar}>
+        <input
+          type="number"
+          step="1000"
+          min="0"
+          autoFocus
+          placeholder="Cuánto"
+          value={monto}
+          onChange={(e) => setMonto(e.target.value)}
+        />
+        <input
+          type="text"
+          maxLength={60}
+          placeholder="De qué (prima, bono…)"
+          value={nota}
+          onChange={(e) => setNota(e.target.value)}
+        />
+        <button className="btn">Guardar</button>
+        <button type="button" className="btn ghost" onClick={() => setAbierto(false)}>
+          Cancelar
+        </button>
+      </form>
+    );
+  }
+
+  if (!q.bono) {
+    return (
+      <button className="bono add" onClick={() => setAbierto(true)}>
+        + Agregar bono
+      </button>
+    );
+  }
+
+  return (
+    <button className="bono tiene" onClick={() => setAbierto(true)}>
+      <span className="nm">{q.bono.nota || "Bono"}</span>
+      <span className="amt num">+ {money(q.bono.monto)}</span>
+    </button>
+  );
+}
+
 function Quincenas({ data, mes, nombre, accion }) {
   const togglear = (f, q) =>
     accion(() =>
@@ -268,8 +332,11 @@ function Quincenas({ data, mes, nombre, accion }) {
           <div className="card" key={q.quincena}>
             <div className="card-h">
               <h3>{q.quincena === "1" ? "Primera quincena" : "Segunda quincena"}</h3>
-              <span className="chip num">+ {money(q.ingreso)}</span>
+              <span className="chip num" title={q.bono ? `${money(q.sueldo)} de sueldo + ${money(q.bono.monto)} de bono` : ""}>
+                + {money(q.ingreso)}
+              </span>
             </div>
+            <Bono q={q} mes={mes} accion={accion} key={mes + q.quincena} />
             {q.filas.map((f) => (
               <label className={"row" + (f.pagado ? " done" : "")} key={f.origen + f.ref}>
                 <input type="checkbox" checked={f.pagado} onChange={() => togglear(f, q.quincena)} />

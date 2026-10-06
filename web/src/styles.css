@@ -211,3 +211,17 @@ footer { margin-top: 34px; color: var(--muted); font-size: 12px; text-align: cen
   background: var(--surface-2); border-radius: 999px; padding: 2px 7px; flex: none;
   font-family: var(--body); letter-spacing: 0; }
 .tc .pie.alerta { color: var(--crit); font-weight: 500; }
+
+/* Un bono es ingreso, no gasto: va arriba de la lista y en verde. */
+.bono { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 10px;
+  width: 100%; padding: 9px 16px; border-top: 1px solid var(--line-soft); cursor: pointer;
+  font-size: 13.5px; }
+.bono:hover { background: var(--surface-2); }
+.bono.add { color: var(--muted); font-weight: 500; }
+.bono.add:hover { color: var(--accent); }
+.bono.tiene .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--ink-2); }
+.bono.tiene .amt { font-weight: 600; color: var(--good); font-variant-numeric: tabular-nums; }
+.bono.edit { display: flex; flex-wrap: wrap; gap: 8px; cursor: default; }
+.bono.edit input { flex: 1 1 110px; }
+.bono.edit:hover { background: none; }
