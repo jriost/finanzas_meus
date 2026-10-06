@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.db
+__pycache__/
+.venv/
+
+# datos personales, no van a GitHub
+*.xlsx
+.env
+backend/semilla.json
