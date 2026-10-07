@@ -230,3 +230,18 @@ footer { margin-top: 34px; color: var(--muted); font-size: 12px; text-align: cen
 .row .cada { font-size: 10.5px; font-weight: 600; color: var(--ink-2); background: var(--surface-2);
   border-radius: 999px; padding: 2px 8px; white-space: nowrap; flex: none; }
 .row.done .cada { color: var(--muted); }
+
+/* La fecha de salida de las deudas: el dato que mas pesa de la seccion. */
+.proy { background: var(--surface); border: 1px solid var(--accent); border-radius: 14px;
+  padding: 18px 18px 16px; margin-bottom: 12px; box-shadow: inset 0 0 0 1px var(--accent); }
+.proy .k { font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--muted); font-weight: 600; }
+.proy .fecha { font-family: var(--display); font-weight: 700; letter-spacing: -0.025em;
+  font-size: clamp(24px, 6vw, 32px); margin-top: 4px; text-transform: capitalize; }
+.proy .s { font-size: 13.5px; color: var(--ink-2); margin-top: 4px; }
+.proy p { margin: 12px 0 0; font-size: 13px; color: var(--ink-2); max-width: 62ch; }
+.proy p b { color: var(--ink); font-weight: 600; }
+.proy .palanca { padding-top: 12px; border-top: 1px solid var(--line-soft); }
+.proy .alerta { color: var(--crit); }
+.proy .letra-chica { font-size: 11.5px; color: var(--muted); }
+.proy.libre .fecha { color: var(--good); }

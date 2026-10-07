@@ -83,6 +83,12 @@ Los conceptos marcados como **ambas** quincenas se parten por la mitad en cada
 una. Los pagos se guardan por mes, así que cambiar de mes empieza la lista en
 limpio sin perder el historial.
 
+La seccion de deudas encabeza con **cuando quedas libre**: la fecha la marca
+la deuda que mas tarda, no la suma de todas, asi que tambien dice cual es y en
+que fecha quedarias sin la demora de esa. Supone que las cuotas no cambian y
+que no vuelves a usar las tarjetas; las deudas sin tasa, sin cuota o cuya
+cuota no cubre los intereses se nombran aparte en vez de falsear la fecha.
+
 No todo gasto es mensual. Cada uno lleva **cada cuántos meses** se cobra y,
 si no es mensual, **desde qué mes**: uno cada 4 quincenas es `cada_meses` 2.
 En los meses que no toca simplemente no aparece, así que el comprometido del

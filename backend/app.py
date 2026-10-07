@@ -278,6 +278,41 @@ def mirar_deuda(d: dict) -> dict:
     }
 
 
+def sumar_meses(mes: str, n: int) -> str:
+    """'AAAA-MM' más n meses."""
+    y, m = map(int, mes.split("-"))
+    total = (y * 12 + m - 1) + n
+    return f"{total // 12:04d}-{total % 12 + 1:02d}"
+
+
+def proyeccion(vistas: list[dict], mes: str) -> dict:
+    """Cuándo quedas libre de deudas, si sigues pagando las cuotas de hoy.
+
+    Es un estimado, y hacia abajo: supone que no vuelves a usar las tarjetas y
+    que las cuotas no cambian. Las deudas sin tasa registrada terminarán más
+    tarde de lo que dice esto, así que se nombran aparte en vez de callarlo.
+    """
+    con_saldo = [d for d in vistas if d["saldo"] > 0]
+    con_fin = [d for d in con_saldo if d["plan"] and d["plan"]["cuotas"]]
+    plazos = sorted((d["plan"]["cuotas"], d["nombre"]) for d in con_fin)
+    ultima = max(con_fin, key=lambda d: d["plan"]["cuotas"], default=None)
+    # Casi siempre una sola deuda marca la fecha; saber cuánto cambiaría sin ella
+    # dice a cuál atacar primero.
+    penultima = plazos[-2][0] if len(plazos) > 1 else None
+    return {
+        "deudas": len(con_saldo),
+        "cuotas": ultima["plan"]["cuotas"] if ultima else None,
+        "fin": sumar_meses(mes, ultima["plan"]["cuotas"] - 1) if ultima else None,
+        "ultima": ultima["nombre"] if ultima else None,
+        "fin_sin_la_ultima": sumar_meses(mes, penultima - 1) if penultima else None,
+        "interes_total": sum(d["plan"]["interes_total"] for d in con_fin) if con_fin else 0,
+        # Las que impiden dar una fecha, cada una por su motivo.
+        "nunca_termina": [d["nombre"] for d in con_saldo if d["plan"] and d["plan"]["crece"]],
+        "sin_cuota": [d["nombre"] for d in con_saldo if not d["plan"]],
+        "sin_tasa": [d["nombre"] for d in con_fin if not d["tasa"]],
+    }
+
+
 def meses_entre(desde: str, hasta: str) -> int:
     """Meses de 'AAAA-MM' a 'AAAA-MM'. Negativo si el segundo es anterior."""
     (ya, ma), (yb, mb) = (map(int, desde.split("-")), map(int, hasta.split("-")))
@@ -383,6 +418,7 @@ def resumen(sueldo: int, items: list[dict], deudas: list[dict],
         "interes_mes": sum(d["plan"]["interes_mes"] for d in vistas if d["plan"]),
         "cupo_total": cupo,
         "cupo_disponible": cupo - usado,
+        "proyeccion": proyeccion(vistas, mes),
     }
 
 
@@ -673,6 +709,39 @@ def _test():
     assert sum(c["monto"] for c in r["por_categoria"]) == r["total"]
     assert [c["categoria"] for c in r["por_categoria"]] == \
         [c for c in CATEGORIAS_GRAFICO if c in {x["categoria"] for x in r["por_categoria"]}]
+
+    # Cuándo quedas libre: manda la deuda que más tarda, no la suma de todas.
+    assert sumar_meses("2026-10", 0) == "2026-10"
+    assert sumar_meses("2026-10", 3) == "2027-01"
+    assert sumar_meses("2026-12", 1) == "2027-01"
+    assert sumar_meses("2026-01", 23) == "2027-12"
+    d = lambda **kw: mirar_deuda({"nombre": "X", "tipo": "tarjeta", "tope": 0, "saldo": 0,
+                                  "cuota": 0, "dia_pago": 0, "tasa": 0, "quincena": "1", **kw})
+    corta = d(nombre="Corta", saldo=400000, cuota=200000)       # 2 cuotas
+    larga = d(nombre="Larga", saldo=1000000, cuota=200000)      # 5 cuotas
+    p = proyeccion([corta, larga], "2026-10")
+    assert (p["cuotas"], p["ultima"]) == (5, "Larga"), p
+    assert p["fin"] == "2027-02", p["fin"]  # octubre es la primera de las 5
+    assert p["deudas"] == 2 and sorted(p["sin_tasa"]) == ["Corta", "Larga"]
+    assert p["fin_sin_la_ultima"] == "2026-11", p  # sin la Larga mandaria la Corta, 2 cuotas
+    assert proyeccion([corta], "2026-10")["fin_sin_la_ultima"] is None  # con una sola, no aplica
+    assert p["interes_total"] == 0 and not p["nunca_termina"] and not p["sin_cuota"]
+
+    # Con tasa tarda más y cobra intereses; el estimado sin tasa se queda corto.
+    con_tasa = proyeccion([d(nombre="Larga", saldo=1000000, cuota=200000, tasa=26.8242)], "2026-10")
+    assert con_tasa["cuotas"] > 5 and con_tasa["interes_total"] > 0, con_tasa
+    assert con_tasa["sin_tasa"] == []
+
+    # Una deuda saldada no cuenta; sin deudas no hay fecha.
+    assert proyeccion([d(saldo=0, cuota=200000)], "2026-10")["deudas"] == 0
+    assert proyeccion([], "2026-10")["fin"] is None
+
+    # Las que impiden dar fecha se nombran, y no tumban el resto del cálculo.
+    rara = proyeccion([larga,
+                       d(nombre="Ahogada", saldo=2000000, cuota=40000, tasa=26.8242),
+                       d(nombre="Sin cuota", saldo=500000, cuota=0)], "2026-10")
+    assert rara["nunca_termina"] == ["Ahogada"] and rara["sin_cuota"] == ["Sin cuota"]
+    assert rara["deudas"] == 3 and rara["cuotas"] == 5, rara  # sigue dando la de las que sí
 
     # Periodicidad: cada 4 quincenas es cada 2 meses, y `desde` dice en cuál empieza.
     assert meses_entre("2026-10", "2026-12") == 2

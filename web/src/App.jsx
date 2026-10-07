@@ -383,6 +383,73 @@ function Interes({ plan, tasa }) {
   );
 }
 
+const mesLargo = (clave) => {
+  const [y, m] = clave.split("-").map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString("es-CO", { month: "long", year: "numeric" });
+};
+const lista = (nombres) =>
+  nombres.length === 1
+    ? nombres[0]
+    : `${nombres.slice(0, -1).join(", ")} y ${nombres[nombres.length - 1]}`;
+
+/** Cuándo quedas libre de deudas si sigues pagando las cuotas de hoy. */
+function Proyeccion({ p }) {
+  if (!p || !p.deudas) {
+    return (
+      <div className="proy libre">
+        <div className="k">Sin deudas</div>
+        <div className="fecha">No debes nada</div>
+      </div>
+    );
+  }
+
+  const avisos = [];
+  if (p.nunca_termina.length)
+    avisos.push(
+      <p className="alerta" key="nunca">
+        {lista(p.nunca_termina)} {p.nunca_termina.length === 1 ? "no entra" : "no entran"} en la
+        cuenta: con la cuota de hoy {p.nunca_termina.length === 1 ? "no termina" : "no terminan"}{" "}
+        nunca, porque no alcanza ni para los intereses.
+      </p>
+    );
+  if (p.sin_cuota.length)
+    avisos.push(
+      <p key="sincuota">
+        Falta la cuota de {lista(p.sin_cuota)} para poder contar{" "}
+        {p.sin_cuota.length === 1 ? "esa deuda" : "esas deudas"}.
+      </p>
+    );
+  if (p.sin_tasa.length)
+    avisos.push(
+      <p key="sintasa">
+        Sin la tasa de {lista(p.sin_tasa)}, la fecha real será más tarde que esta.
+      </p>
+    );
+
+  return (
+    <div className="proy">
+      <div className="k">Libre de deudas en</div>
+      <div className="fecha">{p.fin ? mesLargo(p.fin) : "—"}</div>
+      {p.fin ? (
+        <div className="s num">
+          {p.cuotas} {p.cuotas === 1 ? "cuota" : "cuotas"} · pagarás {money(p.interes_total)} de
+          intereses en el camino
+        </div>
+      ) : null}
+      {p.ultima && p.fin_sin_la_ultima ? (
+        <p className="palanca">
+          <b>{p.ultima}</b> es la que marca la fecha. Terminando esa primero, quedarías libre en{" "}
+          <b>{mesLargo(p.fin_sin_la_ultima)}</b>.
+        </p>
+      ) : null}
+      {avisos}
+      <p className="letra-chica">
+        Cuenta con que no vuelvas a usar las tarjetas y que las cuotas no cambien.
+      </p>
+    </div>
+  );
+}
+
 function Deudas({ data, mes }) {
   const { deudas, deuda_total, cuota_deuda, cupo_total, cupo_disponible } = data;
   // Si sigues pagando la misma cuota, el mes en que la terminas de pagar.
@@ -400,6 +467,7 @@ function Deudas({ data, mes }) {
           {cupo_total ? ` · ${money(cupo_disponible)} de cupo libre` : ""}
         </div>
       </div>
+      <Proyeccion p={data.proyeccion} />
       <div className="cards-grid">
         {deudas.map((d) => {
           // La barra de una tarjeta se llena al deber; la de un crédito, al pagar.
