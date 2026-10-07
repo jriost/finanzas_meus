@@ -142,16 +142,24 @@ def migrar(c):
         c.execute("DELETE FROM items WHERE id=?", (g["id"],))
 
     # Un gasto fijo ya no lleva saldo, valor inicial ni tasa: eso es de una deuda.
-    if cols - {"id", "nombre", "monto", "categoria", "quincena"}:
+    sobran = cols - {"id", "nombre", "monto", "categoria", "quincena", "cada_meses", "desde"}
+    if sobran:
         c.executescript("""
           ALTER TABLE items RENAME TO items_viejo;
           CREATE TABLE items(
             id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, monto INTEGER NOT NULL,
-            categoria TEXT NOT NULL, quincena TEXT NOT NULL);
+            categoria TEXT NOT NULL, quincena TEXT NOT NULL,
+            cada_meses INTEGER NOT NULL DEFAULT 1, desde TEXT NOT NULL DEFAULT '');
           INSERT INTO items(id,nombre,monto,categoria,quincena)
             SELECT id,nombre,monto,categoria,quincena FROM items_viejo;
           DROP TABLE items_viejo;
         """)
+
+    # Bases creadas antes de que un gasto pudiera no ser mensual.
+    faltan = {"cada_meses": "INTEGER NOT NULL DEFAULT 1", "desde": "TEXT NOT NULL DEFAULT ''"}
+    for col, tipo in faltan.items():
+        if col not in columnas(c, "items"):
+            c.execute(f"ALTER TABLE items ADD COLUMN {col} {tipo}")
 
 
 def init_db():
@@ -160,7 +168,9 @@ def init_db():
           CREATE TABLE IF NOT EXISTS config(k TEXT PRIMARY KEY, v TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS items(
             id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, monto INTEGER NOT NULL,
-            categoria TEXT NOT NULL, quincena TEXT NOT NULL);
+            categoria TEXT NOT NULL, quincena TEXT NOT NULL,
+            cada_meses INTEGER NOT NULL DEFAULT 1,  -- 1 = todos los meses, 2 = cada dos...
+            desde TEXT NOT NULL DEFAULT '');        -- AAAA-MM del primer cobro, si no es mensual
           CREATE TABLE IF NOT EXISTS deudas(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nombre TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'tarjeta',
@@ -268,12 +278,39 @@ def mirar_deuda(d: dict) -> dict:
     }
 
 
-def compromisos(items: list[dict], deudas: list[dict]) -> list[dict]:
-    """Los dos maestros vistos como una sola lista de cosas por pagar."""
+def meses_entre(desde: str, hasta: str) -> int:
+    """Meses de 'AAAA-MM' a 'AAAA-MM'. Negativo si el segundo es anterior."""
+    (ya, ma), (yb, mb) = (map(int, desde.split("-")), map(int, hasta.split("-")))
+    return (yb - ya) * 12 + (mb - ma)
+
+
+def cae_en_mes(item: dict, mes: str) -> bool:
+    """Si un gasto se cobra en ese mes.
+
+    Lo normal es que sí: `cada_meses` 1 es todos los meses. Un gasto cada 4
+    quincenas es `cada_meses` 2, y entonces `desde` dice en cuál de los dos
+    empieza; sin ese ancla no hay forma de saberlo, así que cae siempre.
+    """
+    cada = item.get("cada_meses") or 1
+    desde = item.get("desde") or ""
+    if cada <= 1 or not desde:
+        return True
+    d = meses_entre(desde, mes)
+    return d >= 0 and d % cada == 0
+
+
+def compromisos(items: list[dict], deudas: list[dict], mes: str) -> list[dict]:
+    """Lo que hay que pagar ESE mes: los dos maestros en una sola lista.
+
+    Un gasto que no se cobra ese mes simplemente no aparece, así que el total
+    del mes cambia según toque o no el bimestral, el semestral o el anual.
+    """
     de_gastos = [
         {"origen": "gasto", "ref": i["id"], "nombre": i["nombre"], "monto": i["monto"],
-         "categoria": i["categoria"], "quincena": i["quincena"]}
+         "categoria": i["categoria"], "quincena": i["quincena"],
+         "cada_meses": i.get("cada_meses") or 1}
         for i in items
+        if cae_en_mes(i, mes)
     ]
     de_deudas = [
         {"origen": "deuda", "ref": d["id"], "nombre": d["nombre"], "monto": d["cuota"],
@@ -291,11 +328,12 @@ def parte_quincena(c: dict, q: str) -> int:
 
 
 def resumen(sueldo: int, items: list[dict], deudas: list[dict],
-            pagados: set[tuple[str, int, str]], bonos: dict[str, dict] | None = None) -> dict:
-    """Los números del mes. `bonos` son los de ese mes, por quincena: entran como
-    ingreso extra, así que un mes con bono deja más libre que uno sin él."""
+            pagados: set[tuple[str, int, str]], bonos: dict[str, dict] | None = None,
+            mes: str = "1970-01") -> dict:
+    """Los números de ese mes. `bonos` son los de ese mes, por quincena: entran
+    como ingreso extra, así que un mes con bono deja más libre que uno sin él."""
     bonos = bonos or {}
-    lista = compromisos(items, deudas)
+    lista = compromisos(items, deudas, mes)
     total = sum(c["monto"] for c in lista)
 
     por_quincena = []
@@ -359,6 +397,8 @@ class Item(BaseModel):
     monto: int = Field(ge=0, le=10**10)
     categoria: str
     quincena: str
+    cada_meses: int = Field(default=1, ge=1, le=24)
+    desde: str = Field(default="", pattern=r"^(\d{4}-\d{2})?$")
 
     def validar(self):
         if self.categoria not in CATEGORIAS:
@@ -366,6 +406,10 @@ class Item(BaseModel):
                                      "van en su propio maestro.")
         if self.quincena not in QUINCENAS:
             raise HTTPException(422, "La quincena debe ser 1, 2 o ambas.")
+        if self.cada_meses > 1 and not self.desde:
+            raise HTTPException(422, "Dime desde qué mes se cobra, para saber en cuáles cae.")
+        if self.desde and not 1 <= int(self.desde[5:]) <= 12:
+            raise HTTPException(422, "Ese mes no existe.")
         return self
 
 
@@ -446,7 +490,7 @@ def state(mes: str):
         bonos = {r["quincena"]: {"monto": r["monto"], "nota": r["nota"]}
                  for r in c.execute("SELECT quincena,monto,nota FROM bonos WHERE mes=?", (mes,))}
     return {"mes": mes, "items": items, "categorias": CATEGORIAS,
-            **resumen(sueldo, items, deudas, pagados, bonos)}
+            **resumen(sueldo, items, deudas, pagados, bonos, mes)}
 
 
 @app.put("/api/sueldo", dependencies=[Depends(auth)])
@@ -461,8 +505,10 @@ def set_sueldo(body: Sueldo):
 def crear_item(body: Item):
     body.validar()
     with conn() as c:
-        cur = c.execute("INSERT INTO items(nombre,monto,categoria,quincena) VALUES(?,?,?,?)",
-                        (body.nombre, body.monto, body.categoria, body.quincena))
+        cur = c.execute(
+            "INSERT INTO items(nombre,monto,categoria,quincena,cada_meses,desde)"
+            " VALUES(?,?,?,?,?,?)",
+            (body.nombre, body.monto, body.categoria, body.quincena, body.cada_meses, body.desde))
         return {"id": cur.lastrowid, **body.model_dump()}
 
 
@@ -470,8 +516,11 @@ def crear_item(body: Item):
 def editar_item(item_id: int, body: Item):
     body.validar()
     with conn() as c:
-        cur = c.execute("UPDATE items SET nombre=?,monto=?,categoria=?,quincena=? WHERE id=?",
-                        (body.nombre, body.monto, body.categoria, body.quincena, item_id))
+        cur = c.execute(
+            "UPDATE items SET nombre=?,monto=?,categoria=?,quincena=?,cada_meses=?,desde=?"
+            " WHERE id=?",
+            (body.nombre, body.monto, body.categoria, body.quincena, body.cada_meses,
+             body.desde, item_id))
         if not cur.rowcount:
             raise HTTPException(404, "Ese gasto ya no existe.")
     return {"id": item_id, **body.model_dump()}
@@ -624,6 +673,33 @@ def _test():
     assert sum(c["monto"] for c in r["por_categoria"]) == r["total"]
     assert [c["categoria"] for c in r["por_categoria"]] == \
         [c for c in CATEGORIAS_GRAFICO if c in {x["categoria"] for x in r["por_categoria"]}]
+
+    # Periodicidad: cada 4 quincenas es cada 2 meses, y `desde` dice en cuál empieza.
+    assert meses_entre("2026-10", "2026-12") == 2
+    assert meses_entre("2026-11", "2027-02") == 3
+    assert meses_entre("2026-12", "2026-10") == -2
+    cada2 = {"cada_meses": 2, "desde": "2026-10"}
+    assert [m for m in ("2026-09", "2026-10", "2026-11", "2026-12", "2027-01", "2027-02")
+            if cae_en_mes(cada2, m)] == ["2026-10", "2026-12", "2027-02"]
+    assert not cae_en_mes(cada2, "2026-08"), "antes del primer cobro no cae"
+    anual = {"cada_meses": 12, "desde": "2026-03"}
+    assert cae_en_mes(anual, "2027-03") and not cae_en_mes(anual, "2027-02")
+    # Lo normal sigue siendo mensual, y sin ancla cae siempre.
+    assert all(cae_en_mes({"cada_meses": 1, "desde": ""}, m) for m in ("2026-10", "2026-11"))
+    assert cae_en_mes({"cada_meses": 2, "desde": ""}, "2026-11")
+    assert cae_en_mes({}, "2026-11")
+
+    # Un gasto bimestral no suma en el mes que no toca.
+    bimestral = [{"id": 99, "nombre": "Lavada del carro", "monto": 200000,
+                  "categoria": "Otros", "quincena": "1", **cada2}]
+    toca = resumen(2400000, items + bimestral, deudas, set(), mes="2026-10")
+    no_toca = resumen(2400000, items + bimestral, deudas, set(), mes="2026-11")
+    assert toca["total"] == no_toca["total"] + 200000, (toca["total"], no_toca["total"])
+    assert toca["libre"] == no_toca["libre"] - 200000
+    assert any(f["nombre"] == "Lavada del carro" for f in toca["por_quincena"][0]["filas"])
+    assert not any(f["nombre"] == "Lavada del carro"
+                   for q in no_toca["por_quincena"] for f in q["filas"])
+    assert no_toca["total"] == r["total"], "el mes sin el bimestral queda como si no existiera"
 
     # Un bono entra como ingreso de su quincena y solo de esa.
     con_bono = resumen(2400000, items, deudas, pagados=set(),

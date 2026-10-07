@@ -83,6 +83,11 @@ Los conceptos marcados como **ambas** quincenas se parten por la mitad en cada
 una. Los pagos se guardan por mes, así que cambiar de mes empieza la lista en
 limpio sin perder el historial.
 
+No todo gasto es mensual. Cada uno lleva **cada cuántos meses** se cobra y,
+si no es mensual, **desde qué mes**: uno cada 4 quincenas es `cada_meses` 2.
+En los meses que no toca simplemente no aparece, así que el comprometido del
+mes cambia segun caiga o no el bimestral, el semestral o el anual.
+
 Los **bonos** son ingreso suelto de una quincena concreta, no un maestro: se
 guardan por mes igual que los pagos, suman al ingreso de esa quincena y
 desaparecen al cambiar de mes. Guardar uno en cero lo borra.

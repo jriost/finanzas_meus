@@ -342,6 +342,7 @@ function Quincenas({ data, mes, nombre, accion }) {
                 <input type="checkbox" checked={f.pagado} onChange={() => togglear(f, q.quincena)} />
                 <span className="dot" style={{ background: color(f.categoria) }} />
                 <span className="nm">{f.nombre}</span>
+                {f.cada_meses > 1 ? <span className="cada">{cadaTexto(f.cada_meses)}</span> : null}
                 <span className="amt num">{money(f.parte)}</span>
               </label>
             ))}
@@ -460,12 +461,20 @@ function Deudas({ data, mes }) {
 }
 
 /* --------------------------------------------------------------- maestros */
-const GASTO_NUEVO = { nombre: "Nuevo gasto", monto: 0, categoria: "Otros", quincena: "1" };
+const GASTO_NUEVO = { nombre: "Nuevo gasto", monto: 0, categoria: "Otros", quincena: "1", cada_meses: 1, desde: "" };
+const CADA = [
+  [1, "Todos los meses"],
+  [2, "Cada 2 meses (4 quincenas)"],
+  [3, "Cada 3 meses"],
+  [6, "Cada 6 meses"],
+  [12, "Una vez al año"],
+];
+const cadaTexto = (n) => (CADA.find(([v]) => v === n) || [0, `Cada ${n} meses`])[1];
 const DEUDA_NUEVA = {
   nombre: "Nueva tarjeta", tipo: "tarjeta", tope: 0, saldo: 0,
   cuota: 0, dia_pago: 0, tasa: 0, quincena: "1",
 };
-const CAMPOS_GASTO = ["nombre", "monto", "categoria", "quincena"];
+const CAMPOS_GASTO = ["nombre", "monto", "categoria", "quincena", "cada_meses", "desde"];
 const CAMPOS_DEUDA = ["nombre", "tipo", "tope", "saldo", "cuota", "dia_pago", "tasa", "quincena"];
 
 function SelectQuincena({ value, onChange }) {
@@ -612,6 +621,8 @@ function Maestros({ data, accion }) {
                   <th style={{ minWidth: 120 }}>Mensual</th>
                   <th style={{ minWidth: 150 }}>Categoría</th>
                   <th style={{ minWidth: 130 }}>Se paga</th>
+                  <th style={{ minWidth: 180 }}>Cada cuánto</th>
+                  <th style={{ minWidth: 130 }}>Primer cobro</th>
                   <th />
                 </tr>
               </thead>
@@ -649,6 +660,34 @@ function Maestros({ data, accion }) {
                         value={it.quincena}
                         onChange={(e) => guardarGasto(it, { quincena: e.target.value })}
                       />
+                    </td>
+                    <td>
+                      <select
+                        value={it.cada_meses}
+                        onChange={(e) => {
+                          const cada = +e.target.value;
+                          // Si deja de ser mensual hay que anclarlo: arranca en el mes en pantalla.
+                          guardarGasto(it, {
+                            cada_meses: cada,
+                            desde: cada > 1 ? it.desde || data.mes : "",
+                          });
+                        }}
+                      >
+                        {CADA.map(([v, t]) => (
+                          <option key={v} value={v}>{t}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      {it.cada_meses > 1 ? (
+                        <input
+                          type="month"
+                          defaultValue={it.desde}
+                          onBlur={(e) => guardarGasto(it, { desde: e.target.value })}
+                        />
+                      ) : (
+                        <span className="vacio">—</span>
+                      )}
                     </td>
                     <td>
                       <button

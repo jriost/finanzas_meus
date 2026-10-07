@@ -225,3 +225,8 @@ footer { margin-top: 34px; color: var(--muted); font-size: 12px; text-align: cen
 .bono.edit { display: flex; flex-wrap: wrap; gap: 8px; cursor: default; }
 .bono.edit input { flex: 1 1 110px; }
 .bono.edit:hover { background: none; }
+
+/* Un gasto que no es mensual se marca, para que no sorprenda su ausencia. */
+.row .cada { font-size: 10.5px; font-weight: 600; color: var(--ink-2); background: var(--surface-2);
+  border-radius: 999px; padding: 2px 8px; white-space: nowrap; flex: none; }
+.row.done .cada { color: var(--muted); }
