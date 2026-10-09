@@ -14,6 +14,7 @@ import sqlite3
 import sys
 import time
 from contextlib import contextmanager
+from datetime import date
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -285,13 +286,22 @@ def sumar_meses(mes: str, n: int) -> str:
     return f"{total // 12:04d}-{total % 12 + 1:02d}"
 
 
-def proyeccion(vistas: list[dict], mes: str) -> dict:
+def mes_actual() -> str:
+    return date.today().strftime("%Y-%m")
+
+
+def proyeccion(vistas: list[dict], desde: str | None = None) -> dict:
     """Cuándo quedas libre de deudas, si sigues pagando las cuotas de hoy.
+
+    Cuenta desde el mes corriente, no desde el que se esté mirando en pantalla:
+    el saldo guardado es el de hoy, así que hojear meses adelante no cambia lo
+    que falta por pagar ni, por tanto, la fecha en que se acaba.
 
     Es un estimado, y hacia abajo: supone que no vuelves a usar las tarjetas y
     que las cuotas no cambian. Las deudas sin tasa registrada terminarán más
     tarde de lo que dice esto, así que se nombran aparte en vez de callarlo.
     """
+    desde = desde or mes_actual()
     con_saldo = [d for d in vistas if d["saldo"] > 0]
     con_fin = [d for d in con_saldo if d["plan"] and d["plan"]["cuotas"]]
     plazos = sorted((d["plan"]["cuotas"], d["nombre"]) for d in con_fin)
@@ -302,9 +312,10 @@ def proyeccion(vistas: list[dict], mes: str) -> dict:
     return {
         "deudas": len(con_saldo),
         "cuotas": ultima["plan"]["cuotas"] if ultima else None,
-        "fin": sumar_meses(mes, ultima["plan"]["cuotas"] - 1) if ultima else None,
+        "desde": desde,
+        "fin": sumar_meses(desde, ultima["plan"]["cuotas"] - 1) if ultima else None,
         "ultima": ultima["nombre"] if ultima else None,
-        "fin_sin_la_ultima": sumar_meses(mes, penultima - 1) if penultima else None,
+        "fin_sin_la_ultima": sumar_meses(desde, penultima - 1) if penultima else None,
         "interes_total": sum(d["plan"]["interes_total"] for d in con_fin) if con_fin else 0,
         # Las que impiden dar una fecha, cada una por su motivo.
         "nunca_termina": [d["nombre"] for d in con_saldo if d["plan"] and d["plan"]["crece"]],
@@ -418,7 +429,7 @@ def resumen(sueldo: int, items: list[dict], deudas: list[dict],
         "interes_mes": sum(d["plan"]["interes_mes"] for d in vistas if d["plan"]),
         "cupo_total": cupo,
         "cupo_disponible": cupo - usado,
-        "proyeccion": proyeccion(vistas, mes),
+        "proyeccion": proyeccion(vistas),
     }
 
 
@@ -731,6 +742,12 @@ def _test():
     con_tasa = proyeccion([d(nombre="Larga", saldo=1000000, cuota=200000, tasa=26.8242)], "2026-10")
     assert con_tasa["cuotas"] > 5 and con_tasa["interes_total"] > 0, con_tasa
     assert con_tasa["sin_tasa"] == []
+
+    # Hojear meses no mueve la fecha: el saldo guardado sigue siendo el de hoy.
+    hoy = proyeccion([larga])
+    assert hoy["desde"] == mes_actual() and hoy["fin"] == sumar_meses(mes_actual(), 4)
+    assert proyeccion([larga], "2026-10")["fin"] == "2027-02"
+    assert proyeccion([larga], "2027-08")["fin"] == "2027-12"  # anclada aparte, se mueve con el ancla
 
     # Una deuda saldada no cuenta; sin deudas no hay fecha.
     assert proyeccion([d(saldo=0, cuota=200000)], "2026-10")["deudas"] == 0

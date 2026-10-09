@@ -154,7 +154,7 @@ function Panel({ onSalir }) {
           <>
             <Resumen data={data} />
             <Quincenas data={data} mes={clave(mes)} nombre={nombreMes(mes)} accion={accion} />
-            <Deudas data={data} mes={mes} />
+            <Deudas data={data} />
             <Maestros data={data} accion={accion} />
             <footer>
               SQLite propia · {data.items.length} gastos fijos · {data.deudas.length} deudas
@@ -383,6 +383,11 @@ function Interes({ plan, tasa }) {
   );
 }
 
+const sumarMeses = (clave, n) => {
+  const [y, m] = clave.split("-").map(Number);
+  const t = y * 12 + (m - 1) + n;
+  return `${String(Math.floor(t / 12)).padStart(4, "0")}-${String((t % 12) + 1).padStart(2, "0")}`;
+};
 const mesLargo = (clave) => {
   const [y, m] = clave.split("-").map(Number);
   return new Date(y, m - 1, 1).toLocaleDateString("es-CO", { month: "long", year: "numeric" });
@@ -450,11 +455,12 @@ function Proyeccion({ p }) {
   );
 }
 
-function Deudas({ data, mes }) {
+function Deudas({ data }) {
   const { deudas, deuda_total, cuota_deuda, cupo_total, cupo_disponible } = data;
-  // Si sigues pagando la misma cuota, el mes en que la terminas de pagar.
-  const ultimaCuota = (n) =>
-    n ? nombreMes(new Date(mes.getFullYear(), mes.getMonth() + n - 1, 1)) : "";
+  // Cuenta desde el mes corriente, no desde el que se este mirando: el saldo
+  // guardado es el de hoy, asi que hojear meses adelante no acerca ni aleja
+  // la fecha en que se acaba de pagar. El backend ancla igual la proyeccion.
+  const ultimaCuota = (n) => (n ? mesLargo(sumarMeses(data.proyeccion.desde, n - 1)) : "");
 
   return (
     <section>
