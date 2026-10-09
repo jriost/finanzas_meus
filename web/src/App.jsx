@@ -646,7 +646,7 @@ function Maestros({ data, accion }) {
                         step="0.01"
                         min="0"
                         max="500"
-                        placeholder="—"
+                        placeholder="25,19"
                         defaultValue={d.tasa || ""}
                         onBlur={(e) => guardarDeuda(d, { tasa: +e.target.value || 0 })}
                       />
