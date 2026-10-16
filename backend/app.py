@@ -160,6 +160,25 @@ def migrar(c):
     if "abono" not in columnas(c, "pagos"):
         c.execute("ALTER TABLE pagos ADD COLUMN abono INTEGER NOT NULL DEFAULT 0")
 
+    # Los pagos ya marcados entonces no bajaron nada, y volver a hacerles clic
+    # tampoco: la fila ya existe. Se aplican una sola vez, de la mas vieja a la
+    # mas nueva, porque cada abono depende del saldo que dejo el anterior.
+    if existe(c, "deudas") and cfg_get(c, "abonos_al_dia") is None:
+        viejos = c.execute(
+            "SELECT p.mes,p.ref,p.quincena,d.saldo,d.cuota,d.tasa,d.quincena q_deuda"
+            " FROM pagos p JOIN deudas d ON d.id=p.ref"
+            " WHERE p.origen='deuda' AND p.abono=0 AND d.saldo>0 AND d.cuota>0 AND p.mes<=?"
+            " ORDER BY p.mes, p.quincena", (mes_actual(),)).fetchall()
+        for v in viejos:
+            parte = parte_quincena({"monto": v["cuota"], "quincena": v["q_deuda"]}, v["quincena"])
+            saldo = c.execute("SELECT saldo FROM deudas WHERE id=?", (v["ref"],)).fetchone()["saldo"]
+            abono = abono_de_una_cuota(saldo, v["cuota"], v["tasa"], parte)
+            nuevo = max(0, saldo - abono)
+            c.execute("UPDATE deudas SET saldo=? WHERE id=?", (nuevo, v["ref"]))
+            c.execute("UPDATE pagos SET abono=? WHERE mes=? AND origen='deuda' AND ref=? AND quincena=?",
+                      (saldo - nuevo, v["mes"], v["ref"], v["quincena"]))
+        cfg_set(c, "abonos_al_dia", True)
+
     # Bases creadas antes de que un gasto pudiera no ser mensual.
     faltan = {"cada_meses": "INTEGER NOT NULL DEFAULT 1", "desde": "TEXT NOT NULL DEFAULT ''"}
     for col, tipo in faltan.items():
@@ -676,7 +695,9 @@ def marcar_pago(body: Pago):
             return {"ok": True}
 
         abono = 0
-        if body.origen == "deuda":
+        # Marcar la cuota de un mes que aun no llega no baja el saldo de hoy:
+        # queda anotada, y el saldo se mueve cuando ese mes sea el corriente.
+        if body.origen == "deuda" and body.mes <= mes_actual():
             d = c.execute("SELECT * FROM deudas WHERE id=?", (body.ref,)).fetchone()
             if not d:
                 raise HTTPException(404, "Esa deuda ya no existe.")
