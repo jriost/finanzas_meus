@@ -156,6 +156,10 @@ def migrar(c):
           DROP TABLE items_viejo;
         """)
 
+    # Bases creadas antes de que marcar un pago bajara el saldo de la deuda.
+    if "abono" not in columnas(c, "pagos"):
+        c.execute("ALTER TABLE pagos ADD COLUMN abono INTEGER NOT NULL DEFAULT 0")
+
     # Bases creadas antes de que un gasto pudiera no ser mensual.
     faltan = {"cada_meses": "INTEGER NOT NULL DEFAULT 1", "desde": "TEXT NOT NULL DEFAULT ''"}
     for col, tipo in faltan.items():
@@ -185,6 +189,7 @@ def init_db():
             PRIMARY KEY(mes, quincena));
           CREATE TABLE IF NOT EXISTS pagos(
             mes TEXT NOT NULL, origen TEXT NOT NULL, ref INTEGER NOT NULL, quincena TEXT NOT NULL,
+            abono INTEGER NOT NULL DEFAULT 0,  -- cuanto bajo la deuda ese pago, para poder deshacerlo
             PRIMARY KEY(mes, origen, ref, quincena));
         """)
         migrar(c)
@@ -258,6 +263,23 @@ def plan_pago(saldo: int, cuota: int, tasa_ea: float) -> dict | None:
         cuotas += 1
     return {"cuotas": cuotas, "interes_mes": interes_mes,
             "abono_capital": cuota - interes_mes, "interes_total": round(interes), "crece": False}
+
+
+def abono_de_una_cuota(saldo: int, cuota: int, tasa_ea: float, parte: int) -> int:
+    """Cuánto baja la deuda al pagar `parte` de la cuota de ese mes.
+
+    No baja por el valor de la cuota: primero se van los intereses del mes y
+    solo el resto toca el capital. Si la deuda se paga en dos quincenas, cada
+    mitad carga con la mitad de esos intereses.
+
+    Puede dar negativo —la deuda sube— cuando la cuota no cubre ni el interés;
+    eso es lo que de verdad pasa, así que no se maquilla. Nunca abona más de
+    lo que queda debiendo.
+    """
+    if cuota <= 0:
+        return 0
+    interes = saldo * tasa_mensual(tasa_ea) * (parte / cuota)
+    return min(round(parte - interes), saldo)
 
 
 def mirar_deuda(d: dict) -> dict:
@@ -638,14 +660,34 @@ def marcar_pago(body: Pago):
         raise HTTPException(422, "La quincena debe ser 1 o 2.")
     if body.origen not in ("gasto", "deuda"):
         raise HTTPException(422, "El origen debe ser gasto o deuda.")
+    llave = (body.mes, body.origen, body.ref, body.quincena)
     with conn() as c:
-        if body.pagado:
-            c.execute("INSERT OR IGNORE INTO pagos(mes,origen,ref,quincena) VALUES(?,?,?,?)",
-                      (body.mes, body.origen, body.ref, body.quincena))
-        else:
-            c.execute("DELETE FROM pagos WHERE mes=? AND origen=? AND ref=? AND quincena=?",
-                      (body.mes, body.origen, body.ref, body.quincena))
-    return {"ok": True}
+        ya = c.execute("SELECT abono FROM pagos WHERE mes=? AND origen=? AND ref=? AND quincena=?",
+                       llave).fetchone()
+        if body.pagado == bool(ya):
+            return {"ok": True}  # ya estaba así
+
+        if not body.pagado:
+            # Deshacer: devolver a la deuda exactamente lo que este pago le bajó.
+            if ya and ya["abono"]:
+                c.execute("UPDATE deudas SET saldo=MAX(0, saldo + ?) WHERE id=?",
+                          (ya["abono"], body.ref))
+            c.execute("DELETE FROM pagos WHERE mes=? AND origen=? AND ref=? AND quincena=?", llave)
+            return {"ok": True}
+
+        abono = 0
+        if body.origen == "deuda":
+            d = c.execute("SELECT * FROM deudas WHERE id=?", (body.ref,)).fetchone()
+            if not d:
+                raise HTTPException(404, "Esa deuda ya no existe.")
+            parte = parte_quincena({"monto": d["cuota"], "quincena": d["quincena"]}, body.quincena)
+            abono = abono_de_una_cuota(d["saldo"], d["cuota"], d["tasa"], parte)
+            nuevo = max(0, d["saldo"] - abono)
+            abono = d["saldo"] - nuevo  # lo que de verdad se movió, para poder deshacerlo
+            c.execute("UPDATE deudas SET saldo=? WHERE id=?", (nuevo, body.ref))
+        c.execute("INSERT INTO pagos(mes,origen,ref,quincena,abono) VALUES(?,?,?,?,?)",
+                  (*llave, abono))
+    return {"ok": True, "abono": abono}
 
 
 if DIST.is_dir():
@@ -720,6 +762,19 @@ def _test():
     assert sum(c["monto"] for c in r["por_categoria"]) == r["total"]
     assert [c["categoria"] for c in r["por_categoria"]] == \
         [c for c in CATEGORIAS_GRAFICO if c in {x["categoria"] for x in r["por_categoria"]}]
+
+    # Pagar una cuota baja la deuda, pero solo por lo que no se fue en intereses.
+    assert abono_de_una_cuota(1000000, 200000, 0, 200000) == 200000  # sin tasa, baja completa
+    ab = abono_de_una_cuota(1000000, 200000, 26.8242, 200000)
+    assert ab == 200000 - 20000, ab            # al 2% mensual, 20.000 se van en interes
+    # Pagada en dos quincenas, cada mitad carga la mitad del interes y suman igual.
+    m1 = abono_de_una_cuota(1000000, 200000, 26.8242, 100000)
+    assert abs(m1 * 2 - ab) <= 1, (m1, ab)
+    # Si la cuota no cubre el interes, la deuda sube: se dice, no se maquilla.
+    assert abono_de_una_cuota(1000000, 15000, 26.8242, 15000) < 0
+    # Nunca abona mas de lo que falta, ni se cae sin cuota.
+    assert abono_de_una_cuota(50000, 200000, 0, 200000) == 50000
+    assert abono_de_una_cuota(50000, 0, 26.8242, 0) == 0
 
     # Cuándo quedas libre: manda la deuda que más tarda, no la suma de todas.
     assert sumar_meses("2026-10", 0) == "2026-10"

@@ -83,6 +83,12 @@ Los conceptos marcados como **ambas** quincenas se parten por la mitad en cada
 una. Los pagos se guardan por mes, así que cambiar de mes empieza la lista en
 limpio sin perder el historial.
 
+Marcar como pagada la cuota de una tarjeta o un credito **le baja el saldo**,
+pero no por el valor de la cuota: primero se van los intereses del mes y solo
+el resto toca el capital. Cada pago guarda cuanto abono, asi que desmarcarlo
+devuelve exactamente eso. Marcar un gasto fijo no mueve nada, porque un gasto
+no tiene saldo.
+
 La seccion de deudas encabeza con **cuando quedas libre**: la fecha la marca
 la deuda que mas tarda, no la suma de todas, asi que tambien dice cual es y en
 que fecha quedarias sin la demora de esa. Supone que las cuotas no cambian y
