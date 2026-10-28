@@ -206,6 +206,8 @@ def init_db():
             mes TEXT NOT NULL, quincena TEXT NOT NULL,
             monto INTEGER NOT NULL, nota TEXT NOT NULL DEFAULT '',
             PRIMARY KEY(mes, quincena));
+          CREATE TABLE IF NOT EXISTS ahorros(
+            mes TEXT PRIMARY KEY, aporte INTEGER NOT NULL, nota TEXT NOT NULL DEFAULT '');
           CREATE TABLE IF NOT EXISTS pagos(
             mes TEXT NOT NULL, origen TEXT NOT NULL, ref INTEGER NOT NULL, quincena TEXT NOT NULL,
             abono INTEGER NOT NULL DEFAULT 0,  -- cuanto bajo la deuda ese pago, para poder deshacerlo
@@ -218,6 +220,10 @@ def init_db():
         sueldo, gastos, deudas = cargar_semilla()
         if cfg_get(c, "sueldo") is None:
             cfg_set(c, "sueldo", sueldo)
+        if cfg_get(c, "tasa_ahorro") is None:
+            cfg_set(c, "tasa_ahorro", 9.85)   # el bolsillo donde va el ahorro, % E.A.
+        if cfg_get(c, "ahorro_inicial") is None:
+            cfg_set(c, "ahorro_inicial", 0)
         if not c.execute("SELECT 1 FROM items LIMIT 1").fetchone():
             c.executemany("INSERT INTO items(nombre,monto,categoria,quincena) VALUES(?,?,?,?)", gastos)
         if not c.execute("SELECT 1 FROM deudas LIMIT 1").fetchone():
@@ -329,6 +335,51 @@ def sumar_meses(mes: str, n: int) -> str:
 
 def mes_actual() -> str:
     return date.today().strftime("%Y-%m")
+
+
+def historia_ahorro(aportes: dict[str, dict], tasa_ea: float, inicial: int,
+                    hasta: str | None = None) -> dict:
+    """Como ha crecido el ahorro, mes a mes.
+
+    Cada mes el bolsillo rinde sobre lo que ya habia y encima entra el aporte,
+    asi que lo ahorrado y lo ganado se separan: ver cuanto puso uno y cuanto
+    puso el banco es el punto de tener esto.
+
+    Solo cuenta hasta el mes corriente. Un aporte anotado en un mes que aun no
+    llega queda registrado pero no infla el saldo de hoy, igual que los pagos.
+    """
+    hasta = hasta or mes_actual()
+    meses = sorted(m for m in aportes if m <= hasta)
+    if not meses and not inicial:
+        return {"saldo": 0, "aportado": 0, "rendimientos": 0, "filas": []}
+
+    i = tasa_mensual(tasa_ea)
+    desde = meses[0] if meses else hasta
+    saldo, aportado, ganado, filas = float(inicial), inicial, 0.0, []
+    for n in range(meses_entre(desde, hasta) + 1):
+        mes = sumar_meses(desde, n)
+        rend = saldo * i
+        aporte = aportes.get(mes, {}).get("aporte", 0)
+        saldo += rend + aporte
+        aportado += aporte
+        ganado += rend
+        filas.append({"mes": mes, "aporte": aporte, "rendimiento": round(rend),
+                      "saldo": round(saldo), "nota": aportes.get(mes, {}).get("nota", "")})
+    return {"saldo": round(saldo), "aportado": aportado,
+            "rendimientos": round(ganado), "filas": filas}
+
+
+def proyectar_ahorro(saldo: int, aporte: int, tasa_ea: float, meses: int = 12) -> dict:
+    """A donde llega el ahorro si se sigue aportando lo mismo cada mes."""
+    i = tasa_mensual(tasa_ea)
+    s = float(saldo)
+    ganado = 0.0
+    for _ in range(meses):
+        r = s * i
+        s += r + aporte
+        ganado += r
+    return {"meses": meses, "aporte": aporte, "saldo": round(s),
+            "rendimientos": round(ganado), "aportado": aporte * meses}
 
 
 def proyeccion(vistas: list[dict], desde: str | None = None) -> dict:
@@ -534,6 +585,17 @@ class Bono(BaseModel):
     nota: str = Field(default="", max_length=60)
 
 
+class Aporte(BaseModel):
+    mes: str = Field(pattern=r"^\d{4}-\d{2}$")
+    aporte: int = Field(ge=0, le=10**12)
+    nota: str = Field(default="", max_length=60)
+
+
+class AjusteAhorro(BaseModel):
+    tasa: float = Field(ge=0, le=200)        # % efectivo anual del bolsillo
+    inicial: int = Field(ge=0, le=10**12)    # lo que ya habia antes del primer aporte
+
+
 class Pago(BaseModel):
     mes: str = Field(pattern=r"^\d{4}-\d{2}$")
     origen: str
@@ -577,7 +639,23 @@ def state(mes: str):
                    for r in c.execute("SELECT origen,ref,quincena FROM pagos WHERE mes=?", (mes,))}
         bonos = {r["quincena"]: {"monto": r["monto"], "nota": r["nota"]}
                  for r in c.execute("SELECT quincena,monto,nota FROM bonos WHERE mes=?", (mes,))}
-    return {"mes": mes, "items": items, "categorias": CATEGORIAS,
+        aportes = {r["mes"]: {"aporte": r["aporte"], "nota": r["nota"]}
+                   for r in c.execute("SELECT mes,aporte,nota FROM ahorros")}
+        tasa_ahorro = cfg_get(c, "tasa_ahorro", 0.0)
+        inicial = cfg_get(c, "ahorro_inicial", 0)
+
+    hist = historia_ahorro(aportes, tasa_ahorro, inicial)
+    # para proyectar se usa el ultimo aporte real, no un promedio: es lo que la
+    # persona esta metiendo hoy
+    ultimo = next((f["aporte"] for f in reversed(hist["filas"]) if f["aporte"]), 0)
+    ahorro = {
+        **hist,
+        "tasa": tasa_ahorro,
+        "inicial": inicial,
+        "del_mes": aportes.get(mes),
+        "proyeccion": proyectar_ahorro(hist["saldo"], ultimo, tasa_ahorro),
+    }
+    return {"mes": mes, "items": items, "categorias": CATEGORIAS, "ahorro": ahorro,
             **resumen(sueldo, items, deudas, pagados, bonos, mes)}
 
 
@@ -670,6 +748,28 @@ def guardar_bono(body: Bono):
                       (body.mes, body.quincena, body.monto, body.nota.strip()))
         else:
             c.execute("DELETE FROM bonos WHERE mes=? AND quincena=?", (body.mes, body.quincena))
+    return {"ok": True}
+
+
+@app.post("/api/ahorros", dependencies=[Depends(auth)])
+def guardar_aporte(body: Aporte):
+    """Un aporte por mes. En cero se borra, que es como se quita."""
+    with conn() as c:
+        if body.aporte:
+            c.execute("INSERT INTO ahorros(mes,aporte,nota) VALUES(?,?,?)"
+                      " ON CONFLICT(mes) DO UPDATE SET aporte=excluded.aporte,"
+                      " nota=excluded.nota",
+                      (body.mes, body.aporte, body.nota.strip()))
+        else:
+            c.execute("DELETE FROM ahorros WHERE mes=?", (body.mes,))
+    return {"ok": True}
+
+
+@app.put("/api/ahorro", dependencies=[Depends(auth)])
+def ajustar_ahorro(body: AjusteAhorro):
+    with conn() as c:
+        cfg_set(c, "tasa_ahorro", body.tasa)
+        cfg_set(c, "ahorro_inicial", body.inicial)
     return {"ok": True}
 
 
@@ -796,6 +896,51 @@ def _test():
     # Nunca abona mas de lo que falta, ni se cae sin cuota.
     assert abono_de_una_cuota(50000, 200000, 0, 200000) == 50000
     assert abono_de_una_cuota(50000, 0, 26.8242, 0) == 0
+
+    # Ahorro: cada mes rinde sobre lo que ya hay y encima entra el aporte.
+    sin_nada = historia_ahorro({}, 9.85, 0, "2026-10")
+    assert sin_nada["saldo"] == 0 and sin_nada["filas"] == []
+
+    # Un solo aporte, un solo mes: todavia no ha rendido nada sobre si mismo.
+    uno = historia_ahorro({"2026-10": {"aporte": 1000000}}, 9.85, 0, "2026-10")
+    assert uno["saldo"] == 1000000 and uno["rendimientos"] == 0, uno
+    assert uno["aportado"] == 1000000 and len(uno["filas"]) == 1
+
+    # Al mes siguiente el primer millon si rinde, aunque no se aporte mas.
+    dos = historia_ahorro({"2026-10": {"aporte": 1000000}}, 9.85, 0, "2026-11")
+    i = tasa_mensual(9.85)
+    assert dos["rendimientos"] == round(1000000 * i), dos["rendimientos"]
+    assert dos["saldo"] == 1000000 + round(1000000 * i)
+    assert dos["aportado"] == 1000000, "el rendimiento no es aporte"
+
+    # Lo que ya habia antes del primer aporte tambien rinde.
+    con_inicial = historia_ahorro({"2026-10": {"aporte": 0}}, 9.85, 2000000, "2026-10")
+    assert con_inicial["saldo"] == 2000000 + round(2000000 * i), con_inicial
+    assert con_inicial["aportado"] == 2000000
+
+    # Aportar lo mismo 12 meses rinde mas que guardarlo bajo el colchon.
+    doce = historia_ahorro({sumar_meses("2026-01", n): {"aporte": 500000} for n in range(12)},
+                           9.85, 0, "2026-12")
+    assert doce["aportado"] == 500000 * 12
+    assert doce["rendimientos"] > 0 and doce["saldo"] > doce["aportado"]
+    assert doce["saldo"] == doce["aportado"] + doce["rendimientos"]
+
+    # Sin tasa, ahorrar es solo sumar.
+    plano = historia_ahorro({sumar_meses("2026-01", n): {"aporte": 100000} for n in range(6)},
+                            0, 0, "2026-06")
+    assert plano["saldo"] == 600000 and plano["rendimientos"] == 0
+
+    # Un aporte anotado mas adelante no infla el saldo de hoy.
+    futuro = historia_ahorro({"2026-10": {"aporte": 100000}, "2027-05": {"aporte": 9000000}},
+                             9.85, 0, "2026-10")
+    assert futuro["aportado"] == 100000, futuro
+
+    # La proyeccion arranca del saldo que ya hay y suma los aportes que vienen.
+    pr = proyectar_ahorro(1000000, 500000, 9.85, meses=12)
+    assert pr["aportado"] == 6000000
+    assert pr["saldo"] > 1000000 + 6000000      # el bolsillo pone su parte
+    assert pr["rendimientos"] == pr["saldo"] - 1000000 - 6000000
+    assert proyectar_ahorro(1000000, 0, 0, 12)["saldo"] == 1000000, "sin tasa ni aportes, igual"
 
     # Cuándo quedas libre: manda la deuda que más tarda, no la suma de todas.
     assert sumar_meses("2026-10", 0) == "2026-10"

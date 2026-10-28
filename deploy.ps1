@@ -36,9 +36,11 @@ $enElServidor = @'
 set -e
 cd /opt/vidanueva
 cp finanzas.db finanzas.db.bak 2>/dev/null || true
+# dejar solo los 3 respaldos mas recientes: se acumulaban en cada despliegue
+ls -1t finanzas.db.antes-* 2>/dev/null | tail -n +4 | xargs -r rm -f
 rm -rf web/dist
 tar xzf /tmp/vidanueva.tgz && mv dist web/dist && rm /tmp/vidanueva.tgz
-./venv/bin/pip -q install -r backend/requirements.txt
+./venv/bin/pip -q --disable-pip-version-check install -r backend/requirements.txt
 ./venv/bin/python backend/app.py --test
 systemctl restart vidanueva
 for i in $(seq 1 25); do curl -sf -o /dev/null http://127.0.0.1:8100/ && break; sleep 1; done

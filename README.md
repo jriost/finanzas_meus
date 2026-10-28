@@ -72,7 +72,7 @@ cd backend; python app.py --test    # cálculo quincenal, token y lectura del .e
 | Ruta | Qué es |
 |---|---|
 | `backend/app.py` | API completa: login, maestros, pagos y los números calculados |
-| `backend/finanzas.db` | SQLite: `items` y `deudas` (los maestros), `pagos` y `bonos` (por mes) y `config` (sueldo) |
+| `backend/finanzas.db` | SQLite: `items` y `deudas` (los maestros), `pagos`, `bonos` y `ahorros` (por mes) y `config` (sueldo, tasa del bolsillo) |
 | `backend/semilla.json` | Con que se llena una base vacia. Tus cifras, no va a git; `semilla.example.json` es la plantilla |
 | `.env` | Tu usuario y contraseña. No va a git |
 | `deploy.ps1` | Compila y publica en el servidor |
@@ -91,6 +91,13 @@ pero no por el valor de la cuota: primero se van los intereses del mes y solo
 el resto toca el capital. Cada pago guarda cuanto abono, asi que desmarcarlo
 devuelve exactamente eso. Marcar un gasto fijo no mueve nada, porque un gasto
 no tiene saldo.
+
+El **ahorro** se lleva aparte: un aporte por mes en la tabla `ahorros`, y el
+saldo se calcula aplicando mes a mes el rendimiento del bolsillo sobre lo que
+ya habia y sumando encima el aporte. Asi se separa lo que pusiste tu de lo que
+puso el banco, que es el punto de verlo. La tasa del bolsillo y lo que ya
+tenias antes del primer aporte viven en `config`. Un aporte anotado en un mes
+que aun no llega no infla el saldo de hoy, igual que los pagos.
 
 La seccion de deudas encabeza con **cuando quedas libre**: la fecha la marca
 la deuda que mas tarda, no la suma de todas, asi que tambien dice cual es y en

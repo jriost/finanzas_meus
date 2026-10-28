@@ -154,6 +154,7 @@ function Panel({ onSalir }) {
           <>
             <Resumen data={data} />
             <Quincenas data={data} mes={clave(mes)} nombre={nombreMes(mes)} accion={accion} />
+            <Ahorro data={data} mes={clave(mes)} accion={accion} />
             <Deudas data={data} />
             <Maestros data={data} accion={accion} />
             <footer>
@@ -452,6 +453,130 @@ function Proyeccion({ p }) {
         Cuenta con que no vuelvas a usar las tarjetas y que las cuotas no cambien.
       </p>
     </div>
+  );
+}
+
+/* ----------------------------------------------------------------- ahorro */
+function Ahorro({ data, mes, accion }) {
+  const a = data.ahorro;
+  const [editando, setEditando] = useState(false);
+  const [monto, setMonto] = useState(a.del_mes?.aporte ?? "");
+  const [nota, setNota] = useState(a.del_mes?.nota ?? "");
+
+  const guardar = (e) => {
+    e.preventDefault();
+    setEditando(false);
+    accion(() => api("/ahorros", { method: "POST", body: { mes, aporte: +monto || 0, nota } }));
+  };
+
+  // Las columnas se miden contra el saldo mas alto, no contra cada una, para
+  // que se vea el crecimiento y no doce barras iguales.
+  const tope = Math.max(1, ...a.filas.map((f) => f.saldo));
+  const visibles = a.filas.slice(-14);
+
+  return (
+    <section>
+      <div className="head">
+        <h2>Ahorro</h2>
+        <div className="note num">
+          Bolsillo al {tasaTexto(a.tasa)}
+          {a.inicial ? ` · empezó con ${money(a.inicial)}` : ""}
+        </div>
+      </div>
+
+      <div className="tiles">
+        <div className="tile lead">
+          <div className="k">Tienes ahorrado</div>
+          <div className="v num">{money(a.saldo)}</div>
+          <div className="s num">
+            {a.rendimientos
+              ? `${money(a.aportado)} tuyos + ${money(a.rendimientos)} del banco`
+              : "Registra tu primer aporte abajo"}
+          </div>
+        </div>
+        <div className="tile">
+          <div className="k">Lo que has puesto</div>
+          <div className="v num">{money(a.aportado)}</div>
+          <div className="s">
+            {a.filas.filter((f) => f.aporte).length} {a.filas.filter((f) => f.aporte).length === 1 ? "mes" : "meses"} con aporte
+          </div>
+        </div>
+        <div className="tile">
+          <div className="k">Lo que ha rendido</div>
+          <div className="v num ok">{money(a.rendimientos)}</div>
+          <div className="s num">
+            {a.saldo ? `${((a.rendimientos / a.saldo) * 100).toFixed(1)}% de tu saldo` : "—"}
+          </div>
+        </div>
+      </div>
+
+      <div className="rail">
+        <div className="rail-top">
+          <h3>Cómo va creciendo</h3>
+          <div className="meta num">
+            {a.proyeccion.aporte
+              ? `Aportando ${money(a.proyeccion.aporte)} al mes, en un año tendrás ${money(a.proyeccion.saldo)}`
+              : "Aporta este mes para ver la proyección"}
+          </div>
+        </div>
+
+        {visibles.length ? (
+          <>
+            <div className="columnas">
+              {visibles.map((f) => {
+                const puesto = f.saldo ? ((f.saldo - 0) / tope) * 100 : 0;
+                // de cada columna, la porcion que es rendimiento acumulado
+                const acum = a.filas.slice(0, a.filas.indexOf(f) + 1);
+                const rend = acum.reduce((t, x) => t + x.rendimiento, 0);
+                const pctRend = f.saldo ? (rend / f.saldo) * 100 : 0;
+                return (
+                  <div className="col" key={f.mes}
+                    title={`${mesLargo(f.mes)} · saldo ${money(f.saldo)}` +
+                      (f.aporte ? ` · aportaste ${money(f.aporte)}` : "") +
+                      ` · rendimientos ${money(rend)}`}>
+                    <i style={{ height: `${puesto}%` }}>
+                      <b style={{ height: `${pctRend}%` }} />
+                    </i>
+                    <span>{f.mes.slice(5)}</span>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="legend">
+              <div className="lg"><span className="dot" style={{ background: "var(--s1)" }} />
+                <span>Lo que pones <b className="num">{money(a.aportado)}</b></span></div>
+              <div className="lg"><span className="dot" style={{ background: "var(--s3)" }} />
+                <span>Lo que rinde <b className="num">{money(a.rendimientos)}</b></span></div>
+            </div>
+          </>
+        ) : (
+          <p className="vacio-ahorro">Cuando registres un aporte, aquí verás crecer el saldo mes a mes.</p>
+        )}
+      </div>
+
+      <div className="card aporte">
+        {editando ? (
+          <form className="bono edit" onSubmit={guardar}>
+            <input type="number" step="1000" min="0" autoFocus placeholder="Cuánto ahorraste"
+              value={monto} onChange={(e) => setMonto(e.target.value)} />
+            <input type="text" maxLength={60} placeholder="De qué (opcional)"
+              value={nota} onChange={(e) => setNota(e.target.value)} />
+            <button className="btn">Guardar</button>
+            <button type="button" className="btn ghost" onClick={() => setEditando(false)}>
+              Cancelar</button>
+          </form>
+        ) : (
+          <button className={"bono " + (a.del_mes ? "tiene" : "add")} onClick={() => setEditando(true)}>
+            {a.del_mes ? (
+              <>
+                <span className="nm">{a.del_mes.nota || "Ahorrado este mes"}</span>
+                <span className="amt num">+ {money(a.del_mes.aporte)}</span>
+              </>
+            ) : "+ Registrar lo que ahorraste este mes"}
+          </button>
+        )}
+      </div>
+    </section>
   );
 }
 
