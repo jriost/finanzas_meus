@@ -674,12 +674,15 @@ const CADA = [
   [12, "Una vez al año"],
 ];
 const cadaTexto = (n) => (CADA.find(([v]) => v === n) || [0, `Cada ${n} meses`])[1];
-const DEUDA_NUEVA = {
-  nombre: "Nueva tarjeta", tipo: "tarjeta", tope: 0, saldo: 0,
+// El saldo inicial va con el mes del que es: a partir de ahi la pagina deduce
+// lo que se debe hoy, corriendo intereses y restando las cuotas marcadas.
+const deudaNueva = (mes) => ({
+  nombre: "Nueva tarjeta", tipo: "tarjeta", tope: 0, saldo_inicial: 0, desde: mes,
   cuota: 0, dia_pago: 0, tasa: 0, quincena: "1",
-};
+});
 const CAMPOS_GASTO = ["nombre", "monto", "categoria", "quincena", "cada_meses", "desde"];
-const CAMPOS_DEUDA = ["nombre", "tipo", "tope", "saldo", "cuota", "dia_pago", "tasa", "quincena"];
+const CAMPOS_DEUDA = ["nombre", "tipo", "tope", "saldo_inicial", "desde", "cuota", "dia_pago",
+                      "tasa", "quincena"];
 
 function SelectQuincena({ value, onChange }) {
   return (
@@ -730,7 +733,8 @@ function Maestros({ data, accion }) {
                   <th style={{ minWidth: 150 }}>Nombre</th>
                   <th style={{ minWidth: 110 }}>Tipo</th>
                   <th style={{ minWidth: 130 }}>Cupo o valor inicial</th>
-                  <th style={{ minWidth: 115 }}>Saldo que debes</th>
+                  <th style={{ minWidth: 125 }}>Saldo inicial</th>
+                  <th style={{ minWidth: 125 }}>Desde</th>
                   <th style={{ minWidth: 115 }}>Cuota mensual</th>
                   <th style={{ minWidth: 80 }}>Día de pago</th>
                   <th style={{ minWidth: 100 }}>Tasa % E.A.</th>
@@ -754,7 +758,7 @@ function Maestros({ data, accion }) {
                         <option value="credito">Crédito</option>
                       </select>
                     </td>
-                    {["tope", "saldo", "cuota"].map((campo) => (
+                    {["tope", "saldo_inicial"].map((campo) => (
                       <td key={campo}>
                         <input
                           type="number"
@@ -766,6 +770,24 @@ function Maestros({ data, accion }) {
                         />
                       </td>
                     ))}
+                    <td>
+                      <input
+                        type="month"
+                        defaultValue={d.desde}
+                        title={`Hoy debes ${money(d.saldo)}`}
+                        onBlur={(e) => guardarDeuda(d, { desde: e.target.value })}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="number"
+                        step="1000"
+                        min="0"
+                        placeholder="0"
+                        defaultValue={d.cuota || ""}
+                        onBlur={(e) => guardarDeuda(d, { cuota: +e.target.value || 0 })}
+                      />
+                    </td>
                     <td>
                       <input
                         type="number"
@@ -810,7 +832,7 @@ function Maestros({ data, accion }) {
           <div className="ed-row">
             <button
               className="btn"
-              onClick={() => accion(() => api("/deudas", { method: "POST", body: DEUDA_NUEVA }))}
+              onClick={() => accion(() => api("/deudas", { method: "POST", body: deudaNueva(data.mes) }))}
             >
               Agregar tarjeta o crédito
             </button>

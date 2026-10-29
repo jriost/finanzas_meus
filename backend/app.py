@@ -120,7 +120,7 @@ def migrar(c):
     if existe(c, "tarjetas"):
         for t in c.execute("SELECT * FROM tarjetas").fetchall():
             cur = c.execute(
-                "INSERT INTO deudas(nombre,tipo,tope,saldo,cuota,dia_pago,tasa,quincena)"
+                "INSERT INTO deudas(nombre,tipo,tope,saldo_inicial,cuota,dia_pago,tasa,quincena)"
                 " VALUES(?,'tarjeta',?,?,?,?,?,?)",
                 (t["nombre"], t["cupo"], t["saldo"], t["cuota"], t["dia_pago"],
                  t["tasa"] if "tasa" in t.keys() else 0, t["quincena"]))
@@ -133,7 +133,7 @@ def migrar(c):
     for g in c.execute("SELECT * FROM items WHERE categoria IN ('Tarjetas','Crédito')").fetchall():
         tipo = "tarjeta" if g["categoria"] == "Tarjetas" else "credito"
         cur = c.execute(
-            "INSERT INTO deudas(nombre,tipo,tope,saldo,cuota,tasa,quincena) VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO deudas(nombre,tipo,tope,saldo_inicial,cuota,tasa,quincena) VALUES(?,?,?,?,?,?,?)",
             (g["nombre"], tipo,
              g["deuda_inicial"] if "deuda_inicial" in cols else 0,
              g["deuda"] if "deuda" in cols else 0,
@@ -156,28 +156,50 @@ def migrar(c):
           DROP TABLE items_viejo;
         """)
 
-    # Bases creadas antes de que marcar un pago bajara el saldo de la deuda.
-    if "abono" not in columnas(c, "pagos"):
-        c.execute("ALTER TABLE pagos ADD COLUMN abono INTEGER NOT NULL DEFAULT 0")
 
-    # Los pagos ya marcados entonces no bajaron nada, y volver a hacerles clic
-    # tampoco: la fila ya existe. Se aplican una sola vez, de la mas vieja a la
-    # mas nueva, porque cada abono depende del saldo que dejo el anterior.
-    if existe(c, "deudas") and cfg_get(c, "abonos_al_dia") is None:
-        viejos = c.execute(
-            "SELECT p.mes,p.ref,p.quincena,d.saldo,d.cuota,d.tasa,d.quincena q_deuda"
-            " FROM pagos p JOIN deudas d ON d.id=p.ref"
-            " WHERE p.origen='deuda' AND p.abono=0 AND d.saldo>0 AND d.cuota>0 AND p.mes<=?"
-            " ORDER BY p.mes, p.quincena", (mes_actual(),)).fetchall()
-        for v in viejos:
-            parte = parte_quincena({"monto": v["cuota"], "quincena": v["q_deuda"]}, v["quincena"])
-            saldo = c.execute("SELECT saldo FROM deudas WHERE id=?", (v["ref"],)).fetchone()["saldo"]
-            abono = abono_de_una_cuota(saldo, v["cuota"], v["tasa"], parte)
-            nuevo = max(0, saldo - abono)
-            c.execute("UPDATE deudas SET saldo=? WHERE id=?", (nuevo, v["ref"]))
-            c.execute("UPDATE pagos SET abono=? WHERE mes=? AND origen='deuda' AND ref=? AND quincena=?",
-                      (saldo - nuevo, v["mes"], v["ref"], v["quincena"]))
-        cfg_set(c, "abonos_al_dia", True)
+
+    # El saldo de la deuda dejo de guardarse: ahora se deduce recorriendo los
+    # meses. Se reconstruye de donde partia —el saldo de hoy mas todo lo que los
+    # pagos ya le habian bajado— para que el recorrido devuelva lo mismo.
+    if existe(c, "deudas") and "saldo_inicial" not in columnas(c, "deudas"):
+        c.execute("ALTER TABLE deudas ADD COLUMN saldo_inicial INTEGER NOT NULL DEFAULT 0")
+        c.execute("ALTER TABLE deudas ADD COLUMN desde TEXT NOT NULL DEFAULT ''")
+        tiene_abono = "abono" in columnas(c, "pagos")
+        for d in c.execute("SELECT id, saldo FROM deudas").fetchall():
+            bajado = c.execute(
+                "SELECT COALESCE(SUM(%s),0) s, MIN(mes) m FROM pagos"
+                " WHERE origen='deuda' AND ref=?" % ("abono" if tiene_abono else "0"),
+                (d["id"],)).fetchone()
+            c.execute("UPDATE deudas SET saldo_inicial=?, desde=? WHERE id=?",
+                      (d["saldo"] + bajado["s"], bajado["m"] or mes_actual(), d["id"]))
+        c.executescript("""
+          ALTER TABLE deudas RENAME TO deudas_viejo;
+          CREATE TABLE deudas(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'tarjeta',
+            tope INTEGER NOT NULL DEFAULT 0,
+            saldo_inicial INTEGER NOT NULL DEFAULT 0, desde TEXT NOT NULL DEFAULT '',
+            cuota INTEGER NOT NULL DEFAULT 0,
+            dia_pago INTEGER NOT NULL DEFAULT 0, tasa REAL NOT NULL DEFAULT 0,
+            quincena TEXT NOT NULL DEFAULT '1');
+          INSERT INTO deudas(id,nombre,tipo,tope,saldo_inicial,desde,cuota,dia_pago,tasa,quincena)
+            SELECT id,nombre,tipo,tope,saldo_inicial,desde,cuota,dia_pago,tasa,quincena
+            FROM deudas_viejo;
+          DROP TABLE deudas_viejo;
+        """)
+
+    # `abono` ya no se guarda: se deduce del recorrido.
+    if "abono" in columnas(c, "pagos"):
+        c.executescript("""
+          ALTER TABLE pagos RENAME TO pagos_sin_derivar;
+          CREATE TABLE pagos(
+            mes TEXT NOT NULL, origen TEXT NOT NULL, ref INTEGER NOT NULL, quincena TEXT NOT NULL,
+            PRIMARY KEY(mes, origen, ref, quincena));
+          INSERT INTO pagos(mes,origen,ref,quincena)
+            SELECT mes,origen,ref,quincena FROM pagos_sin_derivar;
+          DROP TABLE pagos_sin_derivar;
+        """)
+        cfg_set(c, "abonos_al_dia", True)   # ya no aplica: el recorrido lo cubre
 
     # Bases creadas antes de que un gasto pudiera no ser mensual.
     faltan = {"cada_meses": "INTEGER NOT NULL DEFAULT 1", "desde": "TEXT NOT NULL DEFAULT ''"}
@@ -199,7 +221,9 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nombre TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'tarjeta',
             tope INTEGER NOT NULL DEFAULT 0,      -- cupo de la tarjeta, o con cuánto empezó el crédito
-            saldo INTEGER NOT NULL DEFAULT 0, cuota INTEGER NOT NULL DEFAULT 0,
+            saldo_inicial INTEGER NOT NULL DEFAULT 0,  -- lo que se debia al empezar a seguirla
+            desde TEXT NOT NULL DEFAULT '',            -- AAAA-MM de ese saldo
+            cuota INTEGER NOT NULL DEFAULT 0,
             dia_pago INTEGER NOT NULL DEFAULT 0, tasa REAL NOT NULL DEFAULT 0,
             quincena TEXT NOT NULL DEFAULT '1');
           CREATE TABLE IF NOT EXISTS bonos(
@@ -210,7 +234,6 @@ def init_db():
             mes TEXT PRIMARY KEY, aporte INTEGER NOT NULL, nota TEXT NOT NULL DEFAULT '');
           CREATE TABLE IF NOT EXISTS pagos(
             mes TEXT NOT NULL, origen TEXT NOT NULL, ref INTEGER NOT NULL, quincena TEXT NOT NULL,
-            abono INTEGER NOT NULL DEFAULT 0,  -- cuanto bajo la deuda ese pago, para poder deshacerlo
             PRIMARY KEY(mes, origen, ref, quincena));
         """)
         migrar(c)
@@ -305,6 +328,33 @@ def abono_de_una_cuota(saldo: int, cuota: int, tasa_ea: float, parte: int) -> in
         return 0
     interes = saldo * tasa_mensual(tasa_ea) * (parte / cuota)
     return min(round(parte - interes), saldo)
+
+
+def recorrer_deuda(d: dict, marcas: set, hasta: str) -> list[dict]:
+    """Recorre la deuda mes a mes desde su saldo inicial hasta `hasta`.
+
+    Este es el corazon del modulo: el saldo no se guarda, se deduce. Cada mes
+    corre el interes sobre lo que se debia y se resta lo que se marco pagado en
+    ese mes. Un mes sin marcar no es un mes sin pasar: el interes corre igual y
+    la deuda sube, que es lo que de verdad ocurre.
+
+    Al derivarlo en vez de guardarlo, marcar y desmarcar deja de depender del
+    orden en que se hizo clic, y el saldo avanza solo con el calendario.
+    """
+    i = tasa_mensual(d["tasa"])
+    desde = d["desde"] or hasta
+    saldo = float(d["saldo_inicial"])
+    filas = []
+    for n in range(max(0, meses_entre(desde, hasta)) + 1):
+        mes = sumar_meses(desde, n)
+        interes = saldo * i
+        cobrado = sum(parte_quincena({"monto": d["cuota"], "quincena": d["quincena"]}, q)
+                      for q in ("1", "2") if (mes, q) in marcas)
+        nuevo = max(0.0, saldo + interes - cobrado)
+        filas.append({"mes": mes, "saldo_inicio": round(saldo), "interes": round(interes),
+                      "pagado": cobrado, "abono": round(saldo - nuevo), "saldo": round(nuevo)})
+        saldo = nuevo
+    return filas
 
 
 def mirar_deuda(d: dict) -> dict:
@@ -561,7 +611,8 @@ class Deuda(BaseModel):
     nombre: str = Field(min_length=1, max_length=80)
     tipo: str = "tarjeta"
     tope: int = Field(default=0, ge=0, le=10**12)
-    saldo: int = Field(default=0, ge=0, le=10**12)
+    saldo_inicial: int = Field(default=0, ge=0, le=10**12)
+    desde: str = Field(default="", pattern=r"^(\d{4}-\d{2})?$")
     cuota: int = Field(default=0, ge=0, le=10**10)
     dia_pago: int = Field(default=0, ge=0, le=31)
     tasa: float = Field(default=0, ge=0, le=500)  # % efectivo anual
@@ -572,10 +623,14 @@ class Deuda(BaseModel):
             raise HTTPException(422, "El tipo debe ser tarjeta o credito.")
         if self.quincena not in QUINCENAS:
             raise HTTPException(422, "La quincena debe ser 1, 2 o ambas.")
-        if self.tope and self.saldo > self.tope:
+        if self.tope and self.saldo_inicial > self.tope:
             raise HTTPException(422, "El saldo no puede pasarse del cupo de la tarjeta."
                                 if self.tipo == "tarjeta" else
                                 "El saldo no puede ser mayor que el valor inicial del crédito.")
+        if self.saldo_inicial and not self.desde:
+            raise HTTPException(422, "Dime de qué mes es ese saldo, para poder seguirlo desde ahí.")
+        if self.desde and not 1 <= int(self.desde[5:]) <= 12:
+            raise HTTPException(422, "Ese mes no existe.")
         return self
 
 
@@ -639,16 +694,38 @@ def state(mes: str):
     with conn() as c:
         sueldo = cfg_get(c, "sueldo", 0)
         items = [dict(r) for r in c.execute("SELECT * FROM items ORDER BY monto DESC")]
-        deudas = [dict(r) for r in c.execute("SELECT * FROM deudas ORDER BY saldo DESC")]
-        pagados = {(r["origen"], r["ref"], r["quincena"]): r["abono"]
-                   for r in c.execute("SELECT origen,ref,quincena,abono FROM pagos WHERE mes=?",
-                                      (mes,))}
+        crudas = [dict(r) for r in c.execute("SELECT * FROM deudas")]
+        marcas = {}
+        for r in c.execute("SELECT mes,ref,quincena FROM pagos WHERE origen='deuda'"):
+            marcas.setdefault(r["ref"], set()).add((r["mes"], r["quincena"]))
+        del_mes = {(r["origen"], r["ref"], r["quincena"])
+                   for r in c.execute("SELECT origen,ref,quincena FROM pagos WHERE mes=?", (mes,))}
         bonos = {r["quincena"]: {"monto": r["monto"], "nota": r["nota"]}
                  for r in c.execute("SELECT quincena,monto,nota FROM bonos WHERE mes=?", (mes,))}
         aportes = {r["mes"]: {"aporte": r["aporte"], "nota": r["nota"]}
                    for r in c.execute("SELECT mes,aporte,nota FROM ahorros")}
         tasa_ahorro = cfg_get(c, "tasa_ahorro", 0.0)
         inicial = cfg_get(c, "ahorro_inicial", 0)
+
+    # El saldo de cada deuda se deduce recorriendo sus meses, no sale de la base.
+    hoy = mes_actual()
+    deudas = []
+    for d in crudas:
+        hist = recorrer_deuda(d, marcas.get(d["id"], set()), hoy)
+        deudas.append({**d, "saldo": hist[-1]["saldo"], "historia": hist})
+    deudas.sort(key=lambda d: -d["saldo"])
+
+    # Y el abono de cada cuota marcada sale del saldo con que arranco su mes.
+    pagados = {}
+    for marca in del_mes:
+        origen, ref, q = marca
+        d = next((x for x in deudas if x["id"] == ref), None) if origen == "deuda" else None
+        fila = next((f for f in d["historia"] if f["mes"] == mes), None) if d else None
+        if fila:
+            parte = parte_quincena({"monto": d["cuota"], "quincena": d["quincena"]}, q)
+            pagados[marca] = abono_de_una_cuota(fila["saldo_inicio"], d["cuota"], d["tasa"], parte)
+        else:
+            pagados[marca] = None
 
     hist = historia_ahorro(aportes, tasa_ahorro, inicial)
     # para proyectar se usa el ultimo aporte real, no un promedio: es lo que la
@@ -712,10 +789,10 @@ def crear_deuda(body: Deuda):
     body.validar()
     with conn() as c:
         cur = c.execute(
-            "INSERT INTO deudas(nombre,tipo,tope,saldo,cuota,dia_pago,tasa,quincena)"
-            " VALUES(?,?,?,?,?,?,?,?)",
-            (body.nombre, body.tipo, body.tope, body.saldo, body.cuota, body.dia_pago,
-             body.tasa, body.quincena))
+            "INSERT INTO deudas(nombre,tipo,tope,saldo_inicial,desde,cuota,dia_pago,tasa,"
+            "quincena) VALUES(?,?,?,?,?,?,?,?,?)",
+            (body.nombre, body.tipo, body.tope, body.saldo_inicial, body.desde, body.cuota,
+             body.dia_pago, body.tasa, body.quincena))
         return {"id": cur.lastrowid, **body.model_dump()}
 
 
@@ -724,10 +801,10 @@ def editar_deuda(deuda_id: int, body: Deuda):
     body.validar()
     with conn() as c:
         cur = c.execute(
-            "UPDATE deudas SET nombre=?,tipo=?,tope=?,saldo=?,cuota=?,dia_pago=?,tasa=?,quincena=?"
-            " WHERE id=?",
-            (body.nombre, body.tipo, body.tope, body.saldo, body.cuota, body.dia_pago,
-             body.tasa, body.quincena, deuda_id))
+            "UPDATE deudas SET nombre=?,tipo=?,tope=?,saldo_inicial=?,desde=?,cuota=?,"
+            "dia_pago=?,tasa=?,quincena=? WHERE id=?",
+            (body.nombre, body.tipo, body.tope, body.saldo_inicial, body.desde, body.cuota,
+             body.dia_pago, body.tasa, body.quincena, deuda_id))
         if not cur.rowcount:
             raise HTTPException(404, "Esa deuda ya no existe.")
     return {"id": deuda_id, **body.model_dump()}
@@ -781,40 +858,18 @@ def ajustar_ahorro(body: AjusteAhorro):
 
 @app.post("/api/pagos", dependencies=[Depends(auth)])
 def marcar_pago(body: Pago):
+    """Anota o borra el hecho. Los saldos salen del recorrido, no de aqui."""
     if body.quincena not in ("1", "2"):
         raise HTTPException(422, "La quincena debe ser 1 o 2.")
     if body.origen not in ("gasto", "deuda"):
         raise HTTPException(422, "El origen debe ser gasto o deuda.")
     llave = (body.mes, body.origen, body.ref, body.quincena)
     with conn() as c:
-        ya = c.execute("SELECT abono FROM pagos WHERE mes=? AND origen=? AND ref=? AND quincena=?",
-                       llave).fetchone()
-        if body.pagado == bool(ya):
-            return {"ok": True}  # ya estaba así
-
-        if not body.pagado:
-            # Deshacer: devolver a la deuda exactamente lo que este pago le bajó.
-            if ya and ya["abono"]:
-                c.execute("UPDATE deudas SET saldo=MAX(0, saldo + ?) WHERE id=?",
-                          (ya["abono"], body.ref))
+        if body.pagado:
+            c.execute("INSERT OR IGNORE INTO pagos(mes,origen,ref,quincena) VALUES(?,?,?,?)", llave)
+        else:
             c.execute("DELETE FROM pagos WHERE mes=? AND origen=? AND ref=? AND quincena=?", llave)
-            return {"ok": True}
-
-        abono = 0
-        # Marcar la cuota de un mes que aun no llega no baja el saldo de hoy:
-        # queda anotada, y el saldo se mueve cuando ese mes sea el corriente.
-        if body.origen == "deuda" and body.mes <= mes_actual():
-            d = c.execute("SELECT * FROM deudas WHERE id=?", (body.ref,)).fetchone()
-            if not d:
-                raise HTTPException(404, "Esa deuda ya no existe.")
-            parte = parte_quincena({"monto": d["cuota"], "quincena": d["quincena"]}, body.quincena)
-            abono = abono_de_una_cuota(d["saldo"], d["cuota"], d["tasa"], parte)
-            nuevo = max(0, d["saldo"] - abono)
-            abono = d["saldo"] - nuevo  # lo que de verdad se movió, para poder deshacerlo
-            c.execute("UPDATE deudas SET saldo=? WHERE id=?", (nuevo, body.ref))
-        c.execute("INSERT INTO pagos(mes,origen,ref,quincena,abono) VALUES(?,?,?,?,?)",
-                  (*llave, abono))
-    return {"ok": True, "abono": abono}
+    return {"ok": True}
 
 
 if DIST.is_dir():
@@ -947,6 +1002,49 @@ def _test():
     assert pr["saldo"] > 1000000 + 6000000      # el bolsillo pone su parte
     assert pr["rendimientos"] == pr["saldo"] - 1000000 - 6000000
     assert proyectar_ahorro(1000000, 0, 0, 12)["saldo"] == 1000000, "sin tasa ni aportes, igual"
+
+    # El saldo de una deuda se deduce recorriendo los meses, no se guarda.
+    tar = {"nombre": "T", "tipo": "tarjeta", "tope": 0, "saldo_inicial": 1000000,
+           "desde": "2026-01", "cuota": 200000, "dia_pago": 0, "tasa": 0, "quincena": "1"}
+
+    # Sin tasa y pagando todos los meses, baja la cuota completa.
+    marcas = {(sumar_meses("2026-01", n), "1") for n in range(3)}
+    h = recorrer_deuda(tar, marcas, "2026-03")
+    assert [f["saldo"] for f in h] == [800000, 600000, 400000], h
+
+    # Un mes sin marcar no es un mes sin pasar: la deuda se queda quieta sin tasa...
+    h = recorrer_deuda(tar, {("2026-01", "1")}, "2026-03")
+    assert [f["saldo"] for f in h] == [800000, 800000, 800000]
+    # ...y con tasa, sube.
+    con = recorrer_deuda({**tar, "tasa": 26.8242}, set(), "2026-03")
+    assert con[0]["saldo"] > 1000000 and con[2]["saldo"] > con[0]["saldo"], con
+    assert con[0]["interes"] == 20000, con[0]        # 2% mensual del millon
+
+    # El orden en que se marcan los pagos no cambia el resultado: es un conjunto.
+    a1 = recorrer_deuda({**tar, "tasa": 26.8242}, {("2026-01","1"), ("2026-03","1")}, "2026-03")
+    a2 = recorrer_deuda({**tar, "tasa": 26.8242}, {("2026-03","1"), ("2026-01","1")}, "2026-03")
+    assert [f["saldo"] for f in a1] == [f["saldo"] for f in a2]
+
+    # Marcar un mes intermedio recalcula los que vienen despues, no solo ese.
+    sin_feb = recorrer_deuda(tar, {("2026-01","1"), ("2026-03","1")}, "2026-03")
+    con_feb = recorrer_deuda(tar, marcas, "2026-03")
+    assert con_feb[-1]["saldo"] == sin_feb[-1]["saldo"] - 200000
+
+    # Una deuda que se paga no se vuelve negativa ni resucita.
+    corta = recorrer_deuda({**tar, "saldo_inicial": 150000},
+                           {(sumar_meses("2026-01", n), "1") for n in range(3)}, "2026-03")
+    assert [f["saldo"] for f in corta] == [0, 0, 0], corta
+    assert corta[0]["abono"] == 150000 and corta[1]["abono"] == 0
+
+    # Pagada en las dos quincenas, cada mitad cuenta.
+    ambas = recorrer_deuda({**tar, "quincena": "ambas"},
+                           {("2026-01", "1"), ("2026-01", "2")}, "2026-01")
+    assert ambas[0]["pagado"] == 200000 and ambas[0]["saldo"] == 800000
+    media = recorrer_deuda({**tar, "quincena": "ambas"}, {("2026-01", "1")}, "2026-01")
+    assert media[0]["pagado"] == 100000
+
+    # Sin mes de partida no se cae: arranca donde se le pida.
+    assert recorrer_deuda({**tar, "desde": ""}, set(), "2026-05")[0]["mes"] == "2026-05"
 
     # Cuándo quedas libre: manda la deuda que más tarda, no la suma de todas.
     assert sumar_meses("2026-10", 0) == "2026-10"

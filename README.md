@@ -83,8 +83,19 @@ Los conceptos marcados como **ambas** quincenas se parten por la mitad en cada
 una. Los pagos se guardan por mes, así que cambiar de mes empieza la lista en
 limpio sin perder el historial.
 
-Marcar la cuota de un mes que aun no llega solo la deja anotada: el saldo de
-hoy no se mueve por algo que todavia no has pagado.
+**El saldo de una deuda no se guarda: se deduce.** Lo que la base guarda es el
+saldo inicial con su mes, y los pagos marcados. De ahi el saldo de hoy sale
+recorriendo mes a mes: cada mes corre el interes sobre lo que se debia y se
+resta lo que se marco pagado ese mes.
+
+Eso trae tres cosas que antes no estaban. La deuda avanza sola con el
+calendario, sin que nadie haga clic. Un mes sin marcar no es un mes sin pasar:
+el interes corre igual y la deuda sube, que es lo que de verdad ocurre. Y el
+resultado no depende del orden en que se marcaron los pagos, porque las marcas
+son un conjunto, no una secuencia de restas.
+
+Marcar la cuota de un mes que aun no llega solo la deja anotada: el recorrido
+llega hasta el mes corriente, asi que no mueve el saldo de hoy.
 
 Marcar como pagada la cuota de una tarjeta o un credito **le baja el saldo**,
 pero no por el valor de la cuota: primero se van los intereses del mes y solo
