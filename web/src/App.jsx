@@ -344,6 +344,11 @@ function Quincenas({ data, mes, nombre, accion }) {
                 <span className="dot" style={{ background: color(f.categoria) }} />
                 <span className="nm">{f.nombre}</span>
                 {f.cada_meses > 1 ? <span className="cada">{cadaTexto(f.cada_meses)}</span> : null}
+                {f.abono ? (
+                  <span className="abono num" title={`De la cuota, ${money(f.abono)} bajaron el saldo; el resto se fue en intereses`}>
+                    −{money(f.abono)} a la deuda
+                  </span>
+                ) : null}
                 <span className="amt num">{money(f.parte)}</span>
               </label>
             ))}

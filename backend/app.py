@@ -466,18 +466,23 @@ def parte_quincena(c: dict, q: str) -> int:
 
 
 def resumen(sueldo: int, items: list[dict], deudas: list[dict],
-            pagados: set[tuple[str, int, str]], bonos: dict[str, dict] | None = None,
+            pagados, bonos: dict[str, dict] | None = None,
             mes: str = "1970-01") -> dict:
     """Los números de ese mes. `bonos` son los de ese mes, por quincena: entran
     como ingreso extra, así que un mes con bono deja más libre que uno sin él."""
     bonos = bonos or {}
+    # `pagados` puede venir como conjunto (sin abonos) o como mapa marca -> abono
+    if not isinstance(pagados, dict):
+        pagados = dict.fromkeys(pagados)
     lista = compromisos(items, deudas, mes)
     total = sum(c["monto"] for c in lista)
 
     por_quincena = []
     for q in ("1", "2"):
         filas = [
-            {**c, "parte": parte_quincena(c, q), "pagado": (c["origen"], c["ref"], q) in pagados}
+            {**c, "parte": parte_quincena(c, q),
+             "pagado": (c["origen"], c["ref"], q) in pagados,
+             "abono": pagados.get((c["origen"], c["ref"], q))}
             for c in lista
             if parte_quincena(c, q) > 0
         ]
@@ -635,8 +640,9 @@ def state(mes: str):
         sueldo = cfg_get(c, "sueldo", 0)
         items = [dict(r) for r in c.execute("SELECT * FROM items ORDER BY monto DESC")]
         deudas = [dict(r) for r in c.execute("SELECT * FROM deudas ORDER BY saldo DESC")]
-        pagados = {(r["origen"], r["ref"], r["quincena"])
-                   for r in c.execute("SELECT origen,ref,quincena FROM pagos WHERE mes=?", (mes,))}
+        pagados = {(r["origen"], r["ref"], r["quincena"]): r["abono"]
+                   for r in c.execute("SELECT origen,ref,quincena,abono FROM pagos WHERE mes=?",
+                                      (mes,))}
         bonos = {r["quincena"]: {"monto": r["monto"], "nota": r["nota"]}
                  for r in c.execute("SELECT quincena,monto,nota FROM bonos WHERE mes=?", (mes,))}
         aportes = {r["mes"]: {"aporte": r["aporte"], "nota": r["nota"]}
@@ -1029,6 +1035,14 @@ def _test():
     sin = resumen(2400000, items, deudas, pagados=set(), bonos={})
     assert sin["bono_mes"] == 0 and sin["libre"] == r["libre"]
     assert all(q["bono"] is None for q in sin["por_quincena"])
+
+    # El abono de cada pago viaja hasta la fila, para poder mostrarlo donde se marca.
+    con_abono = resumen(2400000, items, deudas, pagados={("deuda", 1, "1"): 150000})
+    fila = next(f for f in con_abono["por_quincena"][0]["filas"]
+                if f["origen"] == "deuda" and f["ref"] == 1)
+    assert fila["pagado"] and fila["abono"] == 150000, fila
+    sin_abono = next(f for f in r["por_quincena"][0]["filas"] if not f["pagado"])
+    assert sin_abono["abono"] is None, "sin marcar no hay abono"
 
     # Un gasto y una deuda con el mismo id no se confunden al marcar el pago.
     solo_gasto = resumen(2400000, items, deudas, pagados={("gasto", 2, "2")})
