@@ -94,8 +94,10 @@ el interes corre igual y la deuda sube, que es lo que de verdad ocurre. Y el
 resultado no depende del orden en que se marcaron los pagos, porque las marcas
 son un conjunto, no una secuencia de restas.
 
-Marcar la cuota de un mes que aun no llega solo la deja anotada: el recorrido
-llega hasta el mes corriente, asi que no mueve el saldo de hoy.
+Todo lo que sale en pantalla es del mes que se este mirando: la lista de
+pagos, los saldos de las deudas, el ahorro y la fecha de salida. Mezclar la
+lista de un mes con el saldo de otro era lo que hacia que marcar una cuota en
+un mes distinto al corriente no moviera nada.
 
 Marcar como pagada la cuota de una tarjeta o un credito **le baja el saldo**,
 pero no por el valor de la cuota: primero se van los intereses del mes y solo

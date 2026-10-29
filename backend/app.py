@@ -395,8 +395,8 @@ def historia_ahorro(aportes: dict[str, dict], tasa_ea: float, inicial: int,
     asi que lo ahorrado y lo ganado se separan: ver cuanto puso uno y cuanto
     puso el banco es el punto de tener esto.
 
-    Solo cuenta hasta el mes corriente. Un aporte anotado en un mes que aun no
-    llega queda registrado pero no infla el saldo de hoy, igual que los pagos.
+    Cuenta hasta el mes que se le pida, que es el que se esta mirando: asi el
+    ahorro y las deudas hablan del mismo momento.
     """
     hasta = hasta or mes_actual()
     meses = sorted(m for m in aportes if m <= hasta)
@@ -435,9 +435,9 @@ def proyectar_ahorro(saldo: int, aporte: int, tasa_ea: float, meses: int = 12) -
 def proyeccion(vistas: list[dict], desde: str | None = None) -> dict:
     """Cuándo quedas libre de deudas, si sigues pagando las cuotas de hoy.
 
-    Cuenta desde el mes corriente, no desde el que se esté mirando en pantalla:
-    el saldo guardado es el de hoy, así que hojear meses adelante no cambia lo
-    que falta por pagar ni, por tanto, la fecha en que se acaba.
+    Cuenta desde el mes que se este mirando, con los saldos de ese mismo mes:
+    como el saldo tambien se deduce hasta ahi, las dos cosas hablan del mismo
+    momento y la fecha sale bien se mire el mes que se mire.
 
     Es un estimado, y hacia abajo: supone que no vuelves a usar las tarjetas y
     que las cuotas no cambian. Las deudas sin tasa registrada terminarán más
@@ -576,7 +576,7 @@ def resumen(sueldo: int, items: list[dict], deudas: list[dict],
         "interes_mes": sum(d["plan"]["interes_mes"] for d in vistas if d["plan"]),
         "cupo_total": cupo,
         "cupo_disponible": cupo - usado,
-        "proyeccion": proyeccion(vistas),
+        "proyeccion": proyeccion(vistas, mes if mes != "1970-01" else None),
     }
 
 
@@ -707,11 +707,13 @@ def state(mes: str):
         tasa_ahorro = cfg_get(c, "tasa_ahorro", 0.0)
         inicial = cfg_get(c, "ahorro_inicial", 0)
 
-    # El saldo de cada deuda se deduce recorriendo sus meses, no sale de la base.
-    hoy = mes_actual()
+    # El saldo de cada deuda se deduce recorriendo sus meses hasta el mes que se
+    # esta mirando. Todo lo que sale en pantalla es de ese mes: la lista de pagos,
+    # los saldos y la fecha de salida. Mezclar la lista de un mes con el saldo de
+    # otro era lo que hacia que marcar en noviembre no moviera nada.
     deudas = []
     for d in crudas:
-        hist = recorrer_deuda(d, marcas.get(d["id"], set()), hoy)
+        hist = recorrer_deuda(d, marcas.get(d["id"], set()), mes)
         deudas.append({**d, "saldo": hist[-1]["saldo"], "historia": hist})
     deudas.sort(key=lambda d: -d["saldo"])
 
@@ -727,7 +729,7 @@ def state(mes: str):
         else:
             pagados[marca] = None
 
-    hist = historia_ahorro(aportes, tasa_ahorro, inicial)
+    hist = historia_ahorro(aportes, tasa_ahorro, inicial, mes)
     # para proyectar se usa el ultimo aporte real, no un promedio: es lo que la
     # persona esta metiendo hoy
     ultimo = next((f["aporte"] for f in reversed(hist["filas"]) if f["aporte"]), 0)
@@ -1068,11 +1070,11 @@ def _test():
     assert con_tasa["cuotas"] > 5 and con_tasa["interes_total"] > 0, con_tasa
     assert con_tasa["sin_tasa"] == []
 
-    # Hojear meses no mueve la fecha: el saldo guardado sigue siendo el de hoy.
+    # La fecha se cuenta desde el mes que se le pida; sin pedirle nada, desde hoy.
     hoy = proyeccion([larga])
     assert hoy["desde"] == mes_actual() and hoy["fin"] == sumar_meses(mes_actual(), 4)
     assert proyeccion([larga], "2026-10")["fin"] == "2027-02"
-    assert proyeccion([larga], "2027-08")["fin"] == "2027-12"  # anclada aparte, se mueve con el ancla
+    assert proyeccion([larga], "2027-08")["fin"] == "2027-12"
 
     # Una deuda saldada no cuenta; sin deudas no hay fecha.
     assert proyeccion([d(saldo=0, cuota=200000)], "2026-10")["deudas"] == 0
